@@ -1,9 +1,16 @@
 #cloud-config
 # Oracle Cloud Always Free VM bootstrap: MySQL Community Server
-# install + remote access + hardening.
+# install + remote access + hardening + split data/engine volumes.
 # Paste this whole file into the instance's
 # "Advanced Options -> Cloud-init script" field when launching the VM.
 # Target image: Ubuntu 22.04/24.04.
+#
+# Requires two Block Volumes attached (paravirtualized) at instance creation:
+#   1st attached volume -> table data                     (mounted at /data/mysql)
+#   2nd attached volume -> InnoDB system tablespace,
+#                          redo log, and binlog ("engine") (mounted at /data/mysql-engine)
+# Device names below assume /dev/sdb and /dev/sdc in attachment order.
+# Verify with `lsblk` after first boot and adjust DATA_DEV/ENGINE_DEV if different.
 
 package_update: true
 
@@ -15,9 +22,51 @@ write_files:
     owner: root:root
     permissions: '0644'
 
+  # Written before mysql-server is installed: Debian's postinst reads this
+  # and initializes the datadir/innodb/binlog files directly at these paths,
+  # so no data migration step is needed after the fact.
+  - path: /etc/mysql/mysql.conf.d/99-datadir.cnf
+    content: |
+      [mysqld]
+      datadir = /data/mysql
+      innodb_data_home_dir = /data/mysql-engine
+      innodb_log_group_home_dir = /data/mysql-engine
+      log_bin = /data/mysql-engine/binlog
+    owner: root:root
+    permissions: '0644'
+
+  - path: /etc/apparmor.d/local/usr.sbin.mysqld
+    content: |
+      /data/mysql/ r,
+      /data/mysql/** rwk,
+      /data/mysql-engine/ r,
+      /data/mysql-engine/** rwk,
+    owner: root:root
+    permissions: '0644'
+
 runcmd:
-  # ---- 4. install MySQL Community Server ----
+  # ---- split block volumes: table data vs engine (innodb/redo/binlog) ----
+  - |
+    DATA_DEV=/dev/sdb
+    ENGINE_DEV=/dev/sdc
+    mkfs.ext4 -L mysqldata "$DATA_DEV"
+    mkfs.ext4 -L mysqlengine "$ENGINE_DEV"
+    mkdir -p /data/mysql /data/mysql-engine
+    grep -q mysqldata /etc/fstab || echo "LABEL=mysqldata /data/mysql ext4 defaults,nofail 0 2" >> /etc/fstab
+    grep -q mysqlengine /etc/fstab || echo "LABEL=mysqlengine /data/mysql-engine ext4 defaults,nofail 0 2" >> /etc/fstab
+    mount -a
+
+  # mysql user/group must pre-exist and own both mount points before the
+  # package installs, otherwise the postinst init step fails on permissions.
+  - |
+    getent group mysql >/dev/null || groupadd --system mysql
+    getent passwd mysql >/dev/null || useradd --system --gid mysql --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin mysql
+    chown -R mysql:mysql /data/mysql /data/mysql-engine
+    chmod 750 /data/mysql /data/mysql-engine
+
+  # ---- 4. install MySQL Community Server (initializes straight into /data/*) ----
   - DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+  - systemctl reload apparmor
   - systemctl enable --now mysql
 
   # ---- 5. allow remote connections ----
