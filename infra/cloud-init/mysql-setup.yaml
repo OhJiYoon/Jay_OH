@@ -1,0 +1,52 @@
+#cloud-config
+# Oracle Cloud Always Free VM bootstrap: MySQL Community Server
+# install + remote access + hardening.
+# Paste this whole file into the instance's
+# "Advanced Options -> Cloud-init script" field when launching the VM.
+# Target image: Ubuntu 22.04/24.04.
+
+package_update: true
+
+write_files:
+  - path: /etc/mysql/mysql.conf.d/99-remote.cnf
+    content: |
+      [mysqld]
+      bind-address = 0.0.0.0
+    owner: root:root
+    permissions: '0644'
+
+runcmd:
+  # ---- 4. install MySQL Community Server ----
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
+  - systemctl enable --now mysql
+
+  # ---- 5. allow remote connections ----
+  - systemctl restart mysql
+
+  # ---- 6. hardening + app db/user (mysql_secure_installation equivalent) ----
+  - |
+    APP_DB_NAME="appdb"
+    APP_DB_USER="appuser"
+    APP_DB_PASS="$(openssl rand -base64 24)"
+
+    mysql -u root <<SQL
+    DELETE FROM mysql.user WHERE User='';
+    DROP DATABASE IF EXISTS test;
+    DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+    CREATE DATABASE IF NOT EXISTS ${APP_DB_NAME};
+    CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';
+    GRANT ALL PRIVILEGES ON ${APP_DB_NAME}.* TO '${APP_DB_USER}'@'%';
+    FLUSH PRIVILEGES;
+    SQL
+
+    cat > /root/mysql_app_credentials.txt <<EOF
+    database: ${APP_DB_NAME}
+    user:     ${APP_DB_USER}
+    password: ${APP_DB_PASS}
+    EOF
+    chmod 600 /root/mysql_app_credentials.txt
+
+  # ---- 3. OS-level firewall (VCN Security List must still be opened separately) ----
+  - ufw allow OpenSSH
+  - ufw allow 3306/tcp
+  - ufw --force enable
