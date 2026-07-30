@@ -3,7 +3,7 @@
 # install + remote access + hardening + split data/engine volumes.
 # Paste this whole file into the instance's
 # "Advanced Options -> Cloud-init script" field when launching the VM.
-# Target image: Ubuntu 22.04/24.04.
+# Target image: Oracle Linux 8/9.
 #
 # Requires two Block Volumes attached (paravirtualized) at instance creation:
 #   1st attached volume -> table data                     (mounted at /data/mysql)
@@ -11,36 +11,33 @@
 #                          redo log, and binlog ("engine") (mounted at /data/mysql-engine)
 # Device names below assume /dev/sdb and /dev/sdc in attachment order.
 # Verify with `lsblk` after first boot and adjust DATA_DEV/ENGINE_DEV if different.
+#
+# SSH in as the `opc` user (Oracle Linux cloud image default), not `ubuntu`.
 
 package_update: true
 
 write_files:
-  - path: /etc/mysql/mysql.conf.d/99-remote.cnf
+  - path: /etc/my.cnf.d/99-remote.cnf
     content: |
       [mysqld]
       bind-address = 0.0.0.0
     owner: root:root
     permissions: '0644'
 
-  # Written before mysql-server is installed: Debian's postinst reads this
-  # and initializes the datadir/innodb/binlog files directly at these paths,
+  # Written before mysqld's first start: the systemd unit's ExecStartPre
+  # initializes the datadir/innodb/binlog files directly at these paths,
   # so no data migration step is needed after the fact.
-  - path: /etc/mysql/mysql.conf.d/99-datadir.cnf
+  - path: /etc/my.cnf.d/99-datadir.cnf
     content: |
       [mysqld]
       datadir = /data/mysql
       innodb_data_home_dir = /data/mysql-engine
       innodb_log_group_home_dir = /data/mysql-engine
       log_bin = /data/mysql-engine/binlog
-    owner: root:root
-    permissions: '0644'
+      socket = /data/mysql/mysql.sock
 
-  - path: /etc/apparmor.d/local/usr.sbin.mysqld
-    content: |
-      /data/mysql/ r,
-      /data/mysql/** rwk,
-      /data/mysql-engine/ r,
-      /data/mysql-engine/** rwk,
+      [client]
+      socket = /data/mysql/mysql.sock
     owner: root:root
     permissions: '0644'
 
@@ -56,29 +53,31 @@ runcmd:
     grep -q mysqlengine /etc/fstab || echo "LABEL=mysqlengine /data/mysql-engine ext4 defaults,nofail 0 2" >> /etc/fstab
     mount -a
 
-  # mysql user/group must pre-exist and own both mount points before the
-  # package installs, otherwise the postinst init step fails on permissions.
+  # ---- install MySQL Community Server (package creates the mysql user) ----
+  - dnf install -y mysql-server policycoreutils-python-utils
+
+  # mysql user now exists (created by the package); own both mount points
+  # and label them for SELinux before the first service start triggers init.
   - |
-    getent group mysql >/dev/null || groupadd --system mysql
-    getent passwd mysql >/dev/null || useradd --system --gid mysql --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin mysql
     chown -R mysql:mysql /data/mysql /data/mysql-engine
     chmod 750 /data/mysql /data/mysql-engine
+    semanage fcontext -a -t mysqld_db_t "/data/mysql(/.*)?"
+    semanage fcontext -a -t mysqld_db_t "/data/mysql-engine(/.*)?"
+    restorecon -Rv /data/mysql /data/mysql-engine
 
-  # ---- 4. install MySQL Community Server (initializes straight into /data/*) ----
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-  - systemctl reload apparmor
-  - systemctl enable --now mysql
+  # ---- first start: initializes datadir at /data/mysql, logs a temp root password ----
+  - systemctl enable --now mysqld
 
-  # ---- 5. allow remote connections ----
-  - systemctl restart mysql
-
-  # ---- 6. hardening + app db/user (mysql_secure_installation equivalent) ----
+  # ---- hardening + app db/user (mysql_secure_installation equivalent) ----
   - |
+    TEMP_PW=$(grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}')
+    ROOT_PW="$(openssl rand -base64 24)"
     APP_DB_NAME="appdb"
     APP_DB_USER="appuser"
     APP_DB_PASS="$(openssl rand -base64 24)"
 
-    mysql -u root <<SQL
+    mysql --connect-expired-password -u root -p"${TEMP_PW}" <<SQL
+    ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PW}';
     DELETE FROM mysql.user WHERE User='';
     DROP DATABASE IF EXISTS test;
     DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
@@ -89,13 +88,13 @@ runcmd:
     SQL
 
     cat > /root/mysql_app_credentials.txt <<EOF
-    database: ${APP_DB_NAME}
-    user:     ${APP_DB_USER}
-    password: ${APP_DB_PASS}
+    root_password: ${ROOT_PW}
+    database:      ${APP_DB_NAME}
+    user:           ${APP_DB_USER}
+    password:       ${APP_DB_PASS}
     EOF
     chmod 600 /root/mysql_app_credentials.txt
 
-  # ---- 3. OS-level firewall (VCN Security List must still be opened separately) ----
-  - ufw allow OpenSSH
-  - ufw allow 3306/tcp
-  - ufw --force enable
+  # ---- OS-level firewall (VCN Security List must still be opened separately) ----
+  - firewall-cmd --permanent --add-port=3306/tcp
+  - firewall-cmd --reload
