@@ -1,0 +1,100 @@
+#cloud-config
+# Oracle Cloud Always Free VM bootstrap: MySQL Community Server
+# install + remote access + hardening + split data/engine volumes.
+# Paste this whole file into the instance's
+# "Advanced Options -> Cloud-init script" field when launching the VM.
+# Target image: Oracle Linux 8/9.
+#
+# Requires two Block Volumes attached (paravirtualized) at instance creation:
+#   1st attached volume -> table data                     (mounted at /data/mysql)
+#   2nd attached volume -> InnoDB system tablespace,
+#                          redo log, and binlog ("engine") (mounted at /data/mysql-engine)
+# Device names below assume /dev/sdb and /dev/sdc in attachment order.
+# Verify with `lsblk` after first boot and adjust DATA_DEV/ENGINE_DEV if different.
+#
+# SSH in as the `opc` user (Oracle Linux cloud image default), not `ubuntu`.
+
+package_update: true
+
+write_files:
+  - path: /etc/my.cnf.d/99-remote.cnf
+    content: |
+      [mysqld]
+      bind-address = 0.0.0.0
+    owner: root:root
+    permissions: '0644'
+
+  # Written before mysqld's first start: the systemd unit's ExecStartPre
+  # initializes the datadir/innodb/binlog files directly at these paths,
+  # so no data migration step is needed after the fact.
+  - path: /etc/my.cnf.d/99-datadir.cnf
+    content: |
+      [mysqld]
+      datadir = /data/mysql
+      innodb_data_home_dir = /data/mysql-engine
+      innodb_log_group_home_dir = /data/mysql-engine
+      log_bin = /data/mysql-engine/binlog
+      socket = /data/mysql/mysql.sock
+
+      [client]
+      socket = /data/mysql/mysql.sock
+    owner: root:root
+    permissions: '0644'
+
+runcmd:
+  # ---- split block volumes: table data vs engine (innodb/redo/binlog) ----
+  - |
+    DATA_DEV=/dev/sdb
+    ENGINE_DEV=/dev/sdc
+    mkfs.ext4 -L mysqldata "$DATA_DEV"
+    mkfs.ext4 -L mysqlengine "$ENGINE_DEV"
+    mkdir -p /data/mysql /data/mysql-engine
+    grep -q mysqldata /etc/fstab || echo "LABEL=mysqldata /data/mysql ext4 defaults,nofail 0 2" >> /etc/fstab
+    grep -q mysqlengine /etc/fstab || echo "LABEL=mysqlengine /data/mysql-engine ext4 defaults,nofail 0 2" >> /etc/fstab
+    mount -a
+
+  # ---- install MySQL Community Server (package creates the mysql user) ----
+  - dnf install -y mysql-server policycoreutils-python-utils
+
+  # mysql user now exists (created by the package); own both mount points
+  # and label them for SELinux before the first service start triggers init.
+  - |
+    chown -R mysql:mysql /data/mysql /data/mysql-engine
+    chmod 750 /data/mysql /data/mysql-engine
+    semanage fcontext -a -t mysqld_db_t "/data/mysql(/.*)?"
+    semanage fcontext -a -t mysqld_db_t "/data/mysql-engine(/.*)?"
+    restorecon -Rv /data/mysql /data/mysql-engine
+
+  # ---- first start: initializes datadir at /data/mysql, logs a temp root password ----
+  - systemctl enable --now mysqld
+
+  # ---- hardening + app db/user (mysql_secure_installation equivalent) ----
+  - |
+    TEMP_PW=$(grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}')
+    ROOT_PW="$(openssl rand -base64 24)"
+    APP_DB_NAME="appdb"
+    APP_DB_USER="appuser"
+    APP_DB_PASS="$(openssl rand -base64 24)"
+
+    mysql --connect-expired-password -u root -p"${TEMP_PW}" <<SQL
+    ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PW}';
+    DELETE FROM mysql.user WHERE User='';
+    DROP DATABASE IF EXISTS test;
+    DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+    CREATE DATABASE IF NOT EXISTS ${APP_DB_NAME};
+    CREATE USER IF NOT EXISTS '${APP_DB_USER}'@'%' IDENTIFIED BY '${APP_DB_PASS}';
+    GRANT ALL PRIVILEGES ON ${APP_DB_NAME}.* TO '${APP_DB_USER}'@'%';
+    FLUSH PRIVILEGES;
+    SQL
+
+    cat > /root/mysql_app_credentials.txt <<EOF
+    root_password: ${ROOT_PW}
+    database:      ${APP_DB_NAME}
+    user:           ${APP_DB_USER}
+    password:       ${APP_DB_PASS}
+    EOF
+    chmod 600 /root/mysql_app_credentials.txt
+
+  # ---- OS-level firewall (VCN Security List must still be opened separately) ----
+  - firewall-cmd --permanent --add-port=3306/tcp
+  - firewall-cmd --reload
