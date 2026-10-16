@@ -2,7 +2,7 @@
 SELECT HOST_NAME                                                     AS "호스트명"
      , DB_NAME                                                       AS "DB명"
      , INSTANCE_NAME                                                 AS "인스턴스명"
-     , BIZ_DESC                                                      AS "업무설명"
+--   , BIZ_DESC                                                      AS "업무설명"     -- 업무설명 정리 전까지 미표시
      , DB_STATUS                                                     AS "DBMS 서비스"
      , CLUSTER_STATUS                                                AS "클러스터(MSFC) 상태"
      , ACTIVE_NODE                                                   AS "Active 노드"

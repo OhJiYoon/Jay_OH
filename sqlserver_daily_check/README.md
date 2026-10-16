@@ -97,7 +97,7 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 |---|---|---|
 | 호스트명 / Active 노드 | 서버 | `SERVERPROPERTY('ComputerNamePhysicalNetBIOS')` - 현재 서비스 중인 물리 노드명(소문자). 페일오버 시 바뀐다 |
 | 인스턴스명 | 서버 | `SERVERPROPERTY('InstanceName')`, 기본 인스턴스는 `MSSQLSERVER` |
-| DBMS 서비스 | DB | `sys.databases.state_desc`. ONLINE=`정상 서비스`, 그 외(OFFLINE, SUSPECT, RECOVERY_PENDING 등)는 상태값 그대로 |
+| DBMS 서비스 | DB | `sys.databases.state_desc`. ONLINE=`정상 서비스`, 그 외(SUSPECT, RECOVERY_PENDING 등)는 상태값 그대로. **OFFLINE DB 는 점검 대상에서 제외** |
 | 클러스터 / 공유디스크 / MSDTC | 서버 | `dm_os_cluster_nodes`, `dm_io_cluster_shared_drives`, 빈 분산 트랜잭션 시작/커밋. 미클러스터는 `해당없음`. 기존 `usp_Cluster_Status` 는 결과셋이 3개라 한 번에 받기 어려워 같은 로직을 1행으로 재구성 |
 | ErrorLog | 서버 | `xp_readerrorlog` 최근 1일. 오류/실패/교착/IO 지연/스택덤프 등 문제성 메시지만 집계하고 로그인 성공, DBCC 0 errors 등 정보성 메시지는 제외. `Error: 18456` 행과 뒤따르는 `Login failed` 행이 쌍으로 찍히므로 `Error:` 행은 건수에서 제외 |
 | Buffer / Plan Cache Hit Ratio | 서버 | `dm_os_performance_counters` 의 값/base 카운터 쌍으로 계산. Plan Cache 는 Oracle Library Cache Hit Ratio 대응 지표. 둘 다 인스턴스 전역 공유라 DB 단위로 나눌 수 없음 |
@@ -124,6 +124,7 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 
 - 기본은 오늘(`REG_DT = TO_CHAR(SYSDATE, 'YYYYMMDD')`). 다른 날짜는 `REG_DT = :REG_DT` 바인드로 변경
 - **맥스게이지 프로세스** 는 별도 페이지에서 직접 확인하므로 `특이사항 없음` 고정값으로 출력
+- **업무설명** 은 정리 전까지 SELECT 에서 주석 처리 (적재는 계속 됨). 표시하려면 해당 줄의 `--` 를 지운다
 - 끝에 세미콜론 없음 (스크립트에서 실행하기 위함)
 
 ## 한글 인코딩 / sqlcmd 옵션

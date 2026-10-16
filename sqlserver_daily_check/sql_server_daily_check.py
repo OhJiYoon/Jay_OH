@@ -251,6 +251,7 @@ SQL_DATABASES = """
 SELECT name AS database_name, state_desc, recovery_model_desc
 FROM sys.databases
 WHERE database_id > 4
+  AND state_desc <> 'OFFLINE'   -- OFFLINE DB 는 점검 제외
 FOR JSON PATH;
 """
 
