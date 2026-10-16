@@ -22,6 +22,11 @@ CONFIG_PATH = SCRIPT_DIR / "dcheck_config.json"
 DB_DESC_MAP_PATH = SCRIPT_DIR / "db_desc_map.json"
 DB_DESC_MAP_SAMPLE_PATH = SCRIPT_DIR / "db_desc_map.sample.json"
 
+# 비밀번호 - INPUT_HERE 를 실제 값으로 바꾼다. INPUT_HERE 그대로면 환경변수(password_env)에서 읽는다.
+PASSWORD_PLACEHOLDER = "INPUT_HERE"
+DB_PASSWORD = "INPUT_HERE"      # 점검대상 SQL Server (sql_login 계정, 예: LOGADMIN)
+REPO_PASSWORD = "INPUT_HERE"    # 적재 Oracle (repository 계정, 예: IRDMOW)
+
 SQLCMD_LOGIN_TIMEOUT_SEC = 15
 SQLCMD_QUERY_TIMEOUT_SEC = 30
 SQLCMD_TIMEOUT_SEC = 60
@@ -106,6 +111,13 @@ def load_config(path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 2. sqlcmd 실행
 # ---------------------------------------------------------------------------
+def get_password(file_value: str, env_name: str) -> str:
+    """스크립트 상단에 입력한 비밀번호를 우선 사용하고, INPUT_HERE 그대로면 환경변수에서 읽는다."""
+    if file_value and file_value != PASSWORD_PLACEHOLDER:
+        return file_value
+    return get_secret(env_name)
+
+
 def get_secret(env_name: str) -> str:
     """환경변수에서 비밀번호를 읽는다. 현재 프로세스에 없으면 Windows 레지스트리(사용자 → 시스템)에서 읽는다.
     SetEnvironmentVariable 로 설정한 값은 설정 이전에 열린 터미널/IDE 에는 보이지 않기 때문."""
@@ -142,7 +154,7 @@ def get_secret(env_name: str) -> str:
         checked.append(f"레지스트리: 미조회(Windows 기본 Python 아님, sys.platform={sys.platform})")
 
     raise RuntimeError(
-        f"환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다.\n"
+        f"비밀번호가 없습니다: 스크립트 상단 DB_PASSWORD/REPO_PASSWORD 가 INPUT_HERE 이고 환경변수 {env_name} 도 없음.\n"
         f"  실행 계정: {getpass.getuser()} / Python: {sys.executable}\n"
         f"  조회 결과: {'; '.join(checked)}\n"
         f"  PASSWORD 가 들어간 변수명: {sorted(repr(n) for n in similar) or '없음'}\n"
@@ -176,7 +188,7 @@ def build_sqlcmd_env(server: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     if server.get("auth") != "windows":
         env_name = server["password_env"]
-        env["SQLCMDPASSWORD"] = get_secret(env_name)
+        env["SQLCMDPASSWORD"] = get_password(DB_PASSWORD, env_name)
     return env
 
 
@@ -620,7 +632,7 @@ def insert_results_to_repository(rows: list[dict[str, Any]], repo: dict[str, Any
     if not rows:
         return
 
-    password = get_secret(repo["password_env"])
+    password = get_password(REPO_PASSWORD, repo["password_env"])
     table = repo["table"]
 
     import oracledb

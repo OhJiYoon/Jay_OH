@@ -18,15 +18,19 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
 2. **점검대상 프로시저**: 각 인스턴스 master DB 에 `USP_DAILY_JOB_FAIL`, `USP_DAILY_BACKUP_LIST` 가 배포되어 있어야 한다 (sp_daily.sql).
 3. **설정 파일**: `dcheck_config.sample.json` 을 `dcheck_config.json` 으로 복사해서 실제 값으로 수정 (아래 '설정 파일').
    `dcheck_config.json` 은 저장소/배포 파일에 포함되지 않으므로 스크립트를 새 버전으로 덮어써도 유지된다.
-4. **비밀번호 환경변수** (설정 파일/코드에는 비밀번호를 넣지 않는다)
-   ```powershell
-   # 값에 $ 가 있으므로 반드시 작은따옴표
-   [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD',     '<LOGADMIN 비밀번호>', 'User')  # 점검대상 SQL Server
-   [Environment]::SetEnvironmentVariable('DCHECK_REPO_PASSWORD', '<IRDMOW 비밀번호>',   'User')  # 적재 Oracle
+4. **비밀번호**: `sql_server_daily_check.py` 상단의 `INPUT_HERE` 를 실제 값으로 바꾼다.
+   ```python
+   DB_PASSWORD = "INPUT_HERE"      # 점검대상 SQL Server (LOGADMIN)
+   REPO_PASSWORD = "INPUT_HERE"    # 적재 Oracle (IRDMOW)
    ```
-   작업 스케줄러로 돌릴 경우 작업을 실행하는 계정으로 설정하거나 `'Machine'` 범위로 설정한다.
-   설정 확인: `[Environment]::GetEnvironmentVariable('DBCHECK_PASSWORD','User')`
-   (이미 열려 있던 터미널/IDE 에는 새 값이 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다)
+   - 비밀번호에 `\` 나 `"` 가 있으면 `\\`, `\"` 로 쓴다 (`$` 는 그대로).
+   - **새 버전으로 스크립트를 덮어쓰면 다시 `INPUT_HERE` 가 되므로 다시 입력해야 한다.**
+   - 실제 비밀번호를 넣은 파일은 git 에 커밋하지 않는다.
+   - `INPUT_HERE` 그대로 두면 환경변수에서 읽는다 (설정 파일의 `password_env`, 기본 `DBCHECK_PASSWORD` / `DCHECK_REPO_PASSWORD`).
+     ```powershell
+     [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')   # 값에 $ 가 있으면 작은따옴표
+     ```
+     이미 열려 있던 터미널/IDE 에는 새 값이 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다.
 5. **Oracle 적재**: Instant Client, python `oracledb` (설치됨). `create_repository_table.sql` 로 테이블 생성 (최초 1회).
 6. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.
    `db_desc_map.json` 이 있으면 그 파일을, 없으면 샘플을 사용한다. 매핑에 없는 DB 는 `입력 필요` 로 표시된다.
@@ -137,7 +141,7 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 
 ## 보안
 
-- 비밀번호는 환경변수로만 받는다. sqlcmd 에는 `-P` 대신 `SQLCMDPASSWORD` 환경변수로 넘겨 프로세스 목록에 노출되지 않는다.
+- 비밀번호는 스크립트 상단 또는 환경변수에서 받는다. sqlcmd 에는 `-P` 대신 `SQLCMDPASSWORD` 환경변수로 넘겨 프로세스 목록에 노출되지 않는다.
 - Oracle 은 바인드 변수로 INSERT 한다.
 
 ## 운영 영향(부하·지연) 검토
