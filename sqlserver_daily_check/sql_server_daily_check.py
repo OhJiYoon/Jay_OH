@@ -22,10 +22,10 @@ CONFIG_PATH = SCRIPT_DIR / "dcheck_config.json"
 DB_DESC_MAP_PATH = SCRIPT_DIR / "db_desc_map.json"
 DB_DESC_MAP_SAMPLE_PATH = SCRIPT_DIR / "db_desc_map.sample.json"
 
-# 비밀번호 - INPUT_HERE 를 실제 값으로 바꾼다. INPUT_HERE 그대로면 환경변수(password_env)에서 읽는다.
+# 설정 파일의 password 가 이 값 그대로면 미입력으로 보고 환경변수(password_env)에서 읽는다
 PASSWORD_PLACEHOLDER = "INPUT_HERE"
-DB_PASSWORD = "INPUT_HERE"      # 점검대상 SQL Server (sql_login 계정, 예: LOGADMIN)
-REPO_PASSWORD = "INPUT_HERE"    # 적재 Oracle (repository 계정, 예: IRDMOW)
+DEFAULT_DB_PASSWORD_ENV = "DBCHECK_PASSWORD"
+DEFAULT_REPO_PASSWORD_ENV = "DCHECK_REPO_PASSWORD"
 
 SQLCMD_LOGIN_TIMEOUT_SEC = 15
 SQLCMD_QUERY_TIMEOUT_SEC = 30
@@ -111,10 +111,10 @@ def load_config(path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 2. sqlcmd 실행
 # ---------------------------------------------------------------------------
-def get_password(file_value: str, env_name: str) -> str:
-    """스크립트 상단에 입력한 비밀번호를 우선 사용하고, INPUT_HERE 그대로면 환경변수에서 읽는다."""
-    if file_value and file_value != PASSWORD_PLACEHOLDER:
-        return file_value
+def get_password(config_value: str | None, env_name: str) -> str:
+    """설정 파일에 입력한 비밀번호를 우선 사용하고, 비어 있거나 INPUT_HERE 면 환경변수에서 읽는다."""
+    if config_value and config_value != PASSWORD_PLACEHOLDER:
+        return config_value
     return get_secret(env_name)
 
 
@@ -154,7 +154,7 @@ def get_secret(env_name: str) -> str:
         checked.append(f"레지스트리: 미조회(Windows 기본 Python 아님, sys.platform={sys.platform})")
 
     raise RuntimeError(
-        f"비밀번호가 없습니다: 스크립트 상단 DB_PASSWORD/REPO_PASSWORD 가 INPUT_HERE 이고 환경변수 {env_name} 도 없음.\n"
+        f"비밀번호가 없습니다: dcheck_config.json 의 password 가 INPUT_HERE 이고 환경변수 {env_name} 도 없음.\n"
         f"  실행 계정: {getpass.getuser()} / Python: {sys.executable}\n"
         f"  조회 결과: {'; '.join(checked)}\n"
         f"  PASSWORD 가 들어간 변수명: {sorted(repr(n) for n in similar) or '없음'}\n"
@@ -187,8 +187,8 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
 def build_sqlcmd_env(server: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     if server.get("auth") != "windows":
-        env_name = server["password_env"]
-        env["SQLCMDPASSWORD"] = get_password(DB_PASSWORD, env_name)
+        env_name = server.get("password_env", DEFAULT_DB_PASSWORD_ENV)
+        env["SQLCMDPASSWORD"] = get_password(server.get("password"), env_name)
     return env
 
 
@@ -632,7 +632,7 @@ def insert_results_to_repository(rows: list[dict[str, Any]], repo: dict[str, Any
     if not rows:
         return
 
-    password = get_password(REPO_PASSWORD, repo["password_env"])
+    password = get_password(repo.get("password"), repo.get("password_env", DEFAULT_REPO_PASSWORD_ENV))
     table = repo["table"]
 
     import oracledb

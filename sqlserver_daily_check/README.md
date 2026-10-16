@@ -18,19 +18,13 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
 2. **점검대상 프로시저**: 각 인스턴스 master DB 에 `USP_DAILY_JOB_FAIL`, `USP_DAILY_BACKUP_LIST` 가 배포되어 있어야 한다 (sp_daily.sql).
 3. **설정 파일**: `dcheck_config.sample.json` 을 `dcheck_config.json` 으로 복사해서 실제 값으로 수정 (아래 '설정 파일').
    `dcheck_config.json` 은 저장소/배포 파일에 포함되지 않으므로 스크립트를 새 버전으로 덮어써도 유지된다.
-4. **비밀번호**: `sql_server_daily_check.py` 상단의 `INPUT_HERE` 를 실제 값으로 바꾼다.
-   ```python
-   DB_PASSWORD = "INPUT_HERE"      # 점검대상 SQL Server (LOGADMIN)
-   REPO_PASSWORD = "INPUT_HERE"    # 적재 Oracle (IRDMOW)
-   ```
-   - 비밀번호에 `\` 나 `"` 가 있으면 `\\`, `\"` 로 쓴다 (`$` 는 그대로).
-   - **새 버전으로 스크립트를 덮어쓰면 다시 `INPUT_HERE` 가 되므로 다시 입력해야 한다.**
-   - 실제 비밀번호를 넣은 파일은 git 에 커밋하지 않는다.
-   - `INPUT_HERE` 그대로 두면 환경변수에서 읽는다 (설정 파일의 `password_env`, 기본 `DBCHECK_PASSWORD` / `DCHECK_REPO_PASSWORD`).
-     ```powershell
-     [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')   # 값에 $ 가 있으면 작은따옴표
-     ```
-     이미 열려 있던 터미널/IDE 에는 새 값이 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다.
+4. **비밀번호**: `dcheck_config.json` 의 `sql_login.password`(LOGADMIN), `repository.password`(IRDMOW) 의 `INPUT_HERE` 를 실제 값으로 바꾼다.
+   - JSON 이므로 비밀번호에 `\` 나 `"` 가 있으면 `\\`, `\"` 로 쓴다 (`$` 는 그대로).
+   - `dcheck_config.json` 은 배포 파일에 포함되지 않으므로 새 버전으로 덮어써도 유지된다. git 에도 올라가지 않는다(.gitignore).
+   - 서버마다 비밀번호가 다르면 `servers` 의 해당 서버에 `"password": "..."` 를 넣는다.
+   - `INPUT_HERE` 그대로 두면 환경변수(`password_env`, 기본 `DBCHECK_PASSWORD` / `DCHECK_REPO_PASSWORD`)에서 읽는다.
+     이미 열려 있던 터미널/IDE 에는 새 환경변수가 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다.
+   - 파일에 비밀번호가 평문으로 있으므로 실행 계정만 읽을 수 있게 폴더 권한을 제한하는 것을 권장한다.
 5. **Oracle 적재**: Instant Client, python `oracledb` (설치됨). `create_repository_table.sql` 로 테이블 생성 (최초 1회).
 6. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.
    `db_desc_map.json` 이 있으면 그 파일을, 없으면 샘플을 사용한다. 매핑에 없는 DB 는 `입력 필요` 로 표시된다.
@@ -61,9 +55,9 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 |---|---|
 | `sqlcmd_path` | SQLCMD.EXE 전체 경로. **비워두면** PATH → `%ProgramFiles%\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn` → `%ProgramFiles%\Microsoft SQL Server\*\Tools\Binn` → `%ProgramFiles%\SqlCmd` 순서로 자동 탐색. 실행 시 첫 줄에 사용한 경로가 출력됨 |
 | `output_dir` | CSV 저장 폴더. 비우면 스크립트 폴더. 없으면 자동 생성 |
-| `sql_login` | 점검대상 공통 SQL 인증 계정(`user`)과 비밀번호 환경변수 이름(`password_env`) |
-| `servers` | 점검대상 목록. `alias`, `host`, `port` 필수. 서버별로 `user`, `password_env`, `auth`(`sql`/`windows`), `trust_cert` 를 넣으면 공통값 대신 사용. DB 목록은 `sys.databases` 에서 자동 조회 |
-| `repository` | 적재 Oracle 접속정보, 테이블명, Instant Client 경로(`oracle_client_dir`) |
+| `sql_login` | 점검대상 공통 SQL 인증 계정(`user`), 비밀번호(`password`), 비밀번호 미입력 시 읽을 환경변수 이름(`password_env`) |
+| `servers` | 점검대상 목록. `alias`, `host`, `port` 필수. 서버별로 `user`, `password`, `password_env`, `auth`(`sql`/`windows`), `trust_cert` 를 넣으면 공통값 대신 사용. DB 목록은 `sys.databases` 에서 자동 조회 |
+| `repository` | 적재 Oracle 접속정보, 비밀번호(`password`), 테이블명, Instant Client 경로(`oracle_client_dir`) |
 
 경로 작성 규칙
 - JSON 에서는 `\` 를 `\\` 로 두 번 쓰거나 `/` 로 쓴다. 예) `"C:\\Oracle\\instantclient_19_30"` 또는 `"C:/Oracle/instantclient_19_30"`
@@ -141,7 +135,7 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 
 ## 보안
 
-- 비밀번호는 스크립트 상단 또는 환경변수에서 받는다. sqlcmd 에는 `-P` 대신 `SQLCMDPASSWORD` 환경변수로 넘겨 프로세스 목록에 노출되지 않는다.
+- 비밀번호는 `dcheck_config.json`(배포/저장소 제외) 또는 환경변수에서 받는다. sqlcmd 에는 `-P` 대신 `SQLCMDPASSWORD` 환경변수로 넘겨 프로세스 목록에 노출되지 않는다.
 - Oracle 은 바인드 변수로 INSERT 한다.
 
 ## 운영 영향(부하·지연) 검토
