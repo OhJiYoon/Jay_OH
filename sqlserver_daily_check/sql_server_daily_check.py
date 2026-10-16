@@ -24,14 +24,20 @@ SQL Server 일일점검 자동화 스크립트
      - PowerShell (값에 $ 가 있으면 반드시 작은따옴표):
          [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')
      - 작업 스케줄러로 돌릴 경우 "작업을 실행할 계정"으로 로그인해서 설정하거나 'Machine' 범위로 설정.
-4) (선택) DB_DESC_MAP_PATH 에 지정한 JSON 파일로 "업무설명" 매핑을 관리한다.
-   예시는 db_desc_map.sample.json 참고. 없으면 전부 '-' 로 표시된다.
+4) (선택) db_desc_map.json 으로 "업무설명" 매핑을 관리한다 (없으면 db_desc_map.sample.json 사용).
+   매핑에 없는 DB 는 '입력 필요' 로 표시된다.
+5) 결과 적재(Oracle) 준비
+     - Oracle Instant Client: C:\\Oracle\\instantclient_19_30 (ORACLE_CLIENT_DIR)
+     - pip install oracledb
+     - 적재 계정 비밀번호를 환경변수 DCHECK_REPO_PASSWORD 에 설정 (3번과 같은 방법)
+     - 대상 테이블 IRDMOW.TB_MON_DB_MSSQL_DCHECK 생성 (create_repository_table.sql)
 
 출력
 ----
-- 표준화된 점검결과를 콘솔 요약 + CSV(결과일자_시각.csv, UTF-8 BOM) 로 남긴다.
-- insert_results_to_repository() 는 중앙 결과 저장용 INSERT 예시이며, 실제 운영 DB/테이블명에
-  맞게 수정해서 사용한다 (create_repository_table.sql 참고).
+- CSV(daily_check_YYYYMMDD_HHMMSS.csv, UTF-8 BOM) 를 먼저 저장하고,
+  IRDMOW.TB_MON_DB_MSSQL_DCHECK 에 적재한다. 같은 날 재실행 시 해당 서버 결과는 교체된다.
+- 적재 실패 시 종료코드 1 (CSV 는 남아 있음).
+- 엑셀 출력용 조회 쿼리는 select_mssql_dcheck_for_excel.sql 참고.
 """
 
 from __future__ import annotations
@@ -41,7 +47,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -94,7 +99,8 @@ SERVERS: list[dict[str, Any]] = [
 ]
 
 SQLCMD_PATH = "sqlcmd"                 # PATH 에 없으면 전체 경로로 변경
-DB_DESC_MAP_PATH = Path(__file__).with_name("db_desc_map.sample.json")
+DB_DESC_MAP_PATH = Path(__file__).with_name("db_desc_map.json")                 # 실제 매핑 (없으면 아래 샘플 사용)
+DB_DESC_MAP_SAMPLE_PATH = Path(__file__).with_name("db_desc_map.sample.json")
 SQLCMD_LOGIN_TIMEOUT_SEC = 15         # sqlcmd -l : 접속 대기 한도
 SQLCMD_QUERY_TIMEOUT_SEC = 30         # sqlcmd -t : 서버측 쿼리 실행 한도 (초과 시 서버에서 정상 취소)
 SQLCMD_TIMEOUT_SEC = 60               # 파이썬 프로세스 강제종료 한도 (최후 안전장치)
@@ -313,7 +319,7 @@ BEGIN
     BEGIN TRY
         BEGIN DISTRIBUTED TRANSACTION;
         COMMIT TRANSACTION;
-        SET @MSDTCStatus = N'정상';
+        SET @MSDTCStatus = N'특이사항 없음';
     END TRY
     BEGIN CATCH
         IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
@@ -321,14 +327,17 @@ BEGIN
     END CATCH
 END
 
+-- 상태값 표기는 타 DBMS 점검결과(엑셀)와 동일하게: 정상='특이사항 없음', 미클러스터='해당없음'
 SELECT
     @@SERVERNAME AS server_name,
-    CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128)) AS active_node,
+    CAST(SERVERPROPERTY('MachineName') AS nvarchar(128)) AS machine_name,          -- MSFC 는 가상 네트워크명(페일오버해도 불변)
+    ISNULL(CAST(SERVERPROPERTY('InstanceName') AS nvarchar(128)), N'MSSQLSERVER') AS instance_name,
+    CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS nvarchar(128)) AS active_node,  -- 현재 서비스 중인 물리 노드
     @IsClustered AS is_clustered,
-    CASE WHEN @IsClustered = 0 THEN N'단독서버'
-         WHEN @NodeIssues = 0 THEN N'정상' ELSE N'비정상' END AS cluster_status,
     CASE WHEN @IsClustered = 0 THEN N'해당없음'
-         WHEN @SharedDiskIssues = 0 THEN N'정상' ELSE N'비정상' END AS shared_disk_status,
+         WHEN @NodeIssues = 0 THEN N'특이사항 없음' ELSE N'비정상' END AS cluster_status,
+    CASE WHEN @IsClustered = 0 THEN N'해당없음'
+         WHEN @SharedDiskIssues = 0 THEN N'특이사항 없음' ELSE N'비정상' END AS shared_disk_status,
     @MSDTCStatus AS msdtc_status
 FOR JSON PATH;
 """
@@ -427,10 +436,42 @@ FOR JSON PATH;
 # ---------------------------------------------------------------------------
 # 4. 서버 단위 수집 + DB 단위 표준화
 # ---------------------------------------------------------------------------
+FAIL = "점검실패"
+NO_ISSUE = "특이사항 없음"          # 타 DBMS 점검결과(엑셀)와 동일한 정상 표기
+DESC_REQUIRED = "입력 필요"          # 업무설명 매핑이 없는 DB
+
+# 결과 1행의 컬럼 정의: (Oracle 적재 컬럼명, CSV 헤더). 순서 = CSV 컬럼 순서 = 엑셀 출력 순서
+RESULT_COLUMNS: list[tuple[str, str]] = [
+    ("SERVER_ALIAS", "서버번호"),
+    ("HOST_NAME", "호스트명"),
+    ("DB_NAME", "DB명"),
+    ("INSTANCE_NAME", "인스턴스명"),
+    ("BIZ_DESC", "업무설명"),
+    ("DB_STATUS", "DBMS 서비스"),
+    ("CLUSTER_STATUS", "클러스터(MSFC) 상태"),
+    ("ACTIVE_NODE", "Active 노드"),
+    ("SHARED_DISK_STATUS", "공유디스크 상태"),
+    ("MSDTC_STATUS", "MSDTC 상태"),
+    ("ERROR_LOG_CHECK", "ErrorLog"),
+    ("BUFFER_CACHE_HIT_RATIO", "Buffer Cache Hit Ratio"),
+    ("PLAN_CACHE_HIT_RATIO", "Plan Cache Hit Ratio"),
+    ("ENGINE_USED_PCT", "엔진 영역(80%이하)"),
+    ("DATA_USED_PCT", "데이터 영역(95%이하)"),
+    ("LOG_USED_PCT", "트랜잭션로그 영역(80%이하)"),
+    ("LAST_FULL_BACKUP_DT", "데이터백업(Full)"),
+    ("BACKUP_DURATION", "백업 소요시간"),
+    ("BACKUP_SIZE_MB", "백업 크기(MB)"),
+    ("JOB_FAIL_CHECK", "Agent Job 점검"),
+    ("LONG_RUNNING_CHECK", "장시간 수행SQL 점검"),
+    ("CHECK_DT", "점검일시"),
+]
+
+
 def load_db_desc_map() -> dict[str, dict[str, str]]:
-    if DB_DESC_MAP_PATH.exists():
+    path = DB_DESC_MAP_PATH if DB_DESC_MAP_PATH.exists() else DB_DESC_MAP_SAMPLE_PATH
+    if path.exists():
         # 메모장 등에서 저장하면 BOM이 붙을 수 있으므로 utf-8-sig 로 읽는다 (BOM 없어도 정상 동작)
-        with open(DB_DESC_MAP_PATH, encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return json.load(f)
     return {}
 
@@ -438,7 +479,7 @@ def load_db_desc_map() -> dict[str, dict[str, str]]:
 def ratio_pct(value: float | None, base: float | None) -> float | None:
     if not value or not base:
         return None
-    return round(value / base * 100, 1)
+    return round(value / base * 100, 2)
 
 
 def build_disk_map(disk_rows: list[dict[str, Any]]) -> dict[str, dict[str, float | None]]:
@@ -453,11 +494,8 @@ def build_disk_map(disk_rows: list[dict[str, Any]]) -> dict[str, dict[str, float
     return disk_map
 
 
-FAIL = "점검실패"
-
-
 def summarize_error_log(rows: list[dict[str, Any]] | None) -> str:
-    """SQL_ERROR_LOG 요약 1행을 '에러로그_점검' 칸 문자열로 변환 (DDL 컬럼 nvarchar(200) 이내)."""
+    """SQL_ERROR_LOG 요약 1행을 'ErrorLog' 칸 문자열로 변환 (최대 200자)."""
     if rows is None:
         return FAIL
     r = (rows or [{}])[0]
@@ -465,7 +503,7 @@ def summarize_error_log(rows: list[dict[str, Any]] | None) -> str:
         return f"로그 과대({r.get('log_size_mb')}MB) - 미조회, 에러로그 재순환 필요"
     cnt = r.get("issue_cnt") or 0
     if cnt == 0:
-        return "특이사항 없음"
+        return NO_ISSUE
     login_fail = r.get("login_fail_cnt") or 0
     detail = f", 로그인실패 {login_fail}건" if login_fail else ""
     return f"{cnt}건 발견(확인필요{detail}): {r.get('latest_msg') or ''}"[:200]
@@ -480,17 +518,12 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
         databases = run_sqlcmd(server, SQL_DATABASES)
     except Exception as e:
         print(f"[{alias}] 서버 접속/조회 실패, 건너뜀: {e}", file=sys.stderr)
-        return [{
-            "서버번호": alias, "호스트명": server["host"], "DB명": "-", "업무설명": "-",
-            "DB_상태": "점검실패", "클러스터_상태": "-", "공유디스크_상태": "-", "MSDTC_상태": "-",
-            "Job_실패_점검": "-",
-            "Buffer_Cache_Hit_Ratio(%)": None, "Plan_Cache_Hit_Ratio(%)": None,
-            "엔진영역_사용률(%)": None,
-            "데이터파일영역_사용률(%)": None,
-            "트랜잭션로그영역_사용률(%)": None,
-            "최근Full백업_완료일시": None, "백업_소요시간": "-", "백업_사이즈(MB)": None,
-            "장시간쿼리_점검": "-", "에러로그_점검": "-", "점검일시": checked_at,
-        }]
+        row = {col: None for col, _ in RESULT_COLUMNS}
+        row.update({
+            "SERVER_ALIAS": alias, "HOST_NAME": server["host"], "DB_NAME": "-", "INSTANCE_NAME": "-",
+            "BIZ_DESC": "-", "DB_STATUS": FAIL, "CHECK_DT": checked_at,
+        })
+        return [row]
 
     # 서버(인스턴스) 레벨 지표는 한 번만 수집해서 모든 DB 행에 broadcast.
     # 항목별로 독립 실행: 한 항목(예: 프로시저 미배포, 타임아웃)이 실패해도 해당 칸만 '점검실패' 로
@@ -510,9 +543,9 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
     if job_fail_rows is None:
         job_fail_status = FAIL
     elif not job_fail_rows:
-        job_fail_status = "정상"
+        job_fail_status = NO_ISSUE
     else:
-        job_fail_status = "; ".join(f"{r['job_name']}({r['step_name']})" for r in job_fail_rows)
+        job_fail_status = "; ".join(f"{r['job_name']}({r['step_name']})" for r in job_fail_rows)[:1000]
 
     perf = (try_query("성능지표", SQL_PERF_COUNTERS) or [{}])[0]
     buffer_hit_ratio = ratio_pct(perf.get("buffer_hit_value"), perf.get("buffer_hit_base"))
@@ -530,7 +563,8 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
     backup_rows = try_query("백업", SQL_BACKUP_LIST)
     backup_map = {r["database_name"]: r for r in backup_rows or []}
 
-    host_display = cluster.get("server_name") or server["host"]
+    host_name = (cluster.get("machine_name") or server["host"]).lower()   # 엑셀 양식과 동일하게 소문자
+    instance_name = cluster.get("instance_name", "-")
     desc_map_for_server = db_desc_map.get(alias, {})
 
     for db in databases:
@@ -538,34 +572,37 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
         backup = backup_map.get(dbname)
         longrun = long_running_map.get(dbname)
         area = disk_map.get(dbname, {"ROWS": None, "LOG": None})
-        data_used_pct = area["ROWS"]
-        log_used_pct = area["LOG"]
+
+        if long_running_rows is None:
+            long_running_status = FAIL
+        elif not longrun:
+            long_running_status = NO_ISSUE
+        else:
+            long_running_status = f"{longrun['session_cnt']}건, 최대 {longrun['max_elapsed_sec']}초"
 
         rows.append({
-            "서버번호": alias,
-            "호스트명": host_display,
-            "DB명": dbname,
-            "업무설명": desc_map_for_server.get(dbname, "-"),
-            "DB_상태": "정상" if db["state_desc"] == "ONLINE" else db["state_desc"],
-            "클러스터_상태": cluster.get("cluster_status", cluster_default),
-            "공유디스크_상태": cluster.get("shared_disk_status", cluster_default),
-            "MSDTC_상태": cluster.get("msdtc_status", cluster_default),
-            "Job_실패_점검": job_fail_status,
-            "Buffer_Cache_Hit_Ratio(%)": buffer_hit_ratio,
-            "Plan_Cache_Hit_Ratio(%)": plan_hit_ratio,
-            "엔진영역_사용률(%)": engine_used_pct,
-            "데이터파일영역_사용률(%)": data_used_pct,
-            "트랜잭션로그영역_사용률(%)": log_used_pct,
-            "최근Full백업_완료일시": backup["backup_finished"] if backup else None,
-            "백업_소요시간": backup["total_time"] if backup else (FAIL if backup_rows is None else "확인필요"),
-            "백업_사이즈(MB)": backup["backup_size_mb"] if backup else None,
-            "장시간쿼리_점검": (
-                FAIL if long_running_rows is None
-                else "정상" if not longrun
-                else f"{longrun['session_cnt']}건, 최대 {longrun['max_elapsed_sec']}초"
-            ),
-            "에러로그_점검": error_log_status,
-            "점검일시": checked_at,
+            "SERVER_ALIAS": alias,
+            "HOST_NAME": host_name,
+            "DB_NAME": dbname,
+            "INSTANCE_NAME": instance_name,
+            "BIZ_DESC": desc_map_for_server.get(dbname) or DESC_REQUIRED,
+            "DB_STATUS": "정상 서비스" if db["state_desc"] == "ONLINE" else db["state_desc"],
+            "CLUSTER_STATUS": cluster.get("cluster_status", cluster_default),
+            "ACTIVE_NODE": (cluster.get("active_node") or "-").lower(),
+            "SHARED_DISK_STATUS": cluster.get("shared_disk_status", cluster_default),
+            "MSDTC_STATUS": cluster.get("msdtc_status", cluster_default),
+            "ERROR_LOG_CHECK": error_log_status,
+            "BUFFER_CACHE_HIT_RATIO": buffer_hit_ratio,
+            "PLAN_CACHE_HIT_RATIO": plan_hit_ratio,
+            "ENGINE_USED_PCT": engine_used_pct,
+            "DATA_USED_PCT": area["ROWS"],
+            "LOG_USED_PCT": area["LOG"],
+            "LAST_FULL_BACKUP_DT": backup["backup_finished"] if backup else None,
+            "BACKUP_DURATION": backup["total_time"] if backup else (FAIL if backup_rows is None else "확인필요"),
+            "BACKUP_SIZE_MB": backup["backup_size_mb"] if backup else None,
+            "JOB_FAIL_CHECK": job_fail_status,
+            "LONG_RUNNING_CHECK": long_running_status,
+            "CHECK_DT": checked_at,
         })
 
     return rows
@@ -583,114 +620,104 @@ def run_daily_check() -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 5. 결과 저장: CSV 출력
+# 5. 결과 저장: CSV 출력 (로컬 보관용)
 # ---------------------------------------------------------------------------
 def export_csv(rows: list[dict[str, Any]], out_path: Path) -> None:
     if not rows:
         print("저장할 결과가 없습니다.")
         return
-    fieldnames = list(rows[0].keys())
     # Windows Excel은 BOM이 없는 UTF-8 CSV를 CP949로 해석해 한글이 깨지므로 반드시 utf-8-sig(BOM 포함)로 저장
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.writer(f)
+        writer.writerow([header for _, header in RESULT_COLUMNS])
+        for r in rows:
+            writer.writerow([r[col] for col, _ in RESULT_COLUMNS])
     print(f"CSV 저장 완료: {out_path}")
 
 
 # ---------------------------------------------------------------------------
-# 6. 결과 저장: 중앙 저장소 INSERT 예시 (실제 환경에 맞게 변경 예정)
+# 6. 결과 저장: Oracle 중앙 저장소 적재 (IRDMOW.TB_MON_DB_MSSQL_DCHECK)
 # ---------------------------------------------------------------------------
-# 대상 테이블 DDL 은 create_repository_table.sql 참고.
-REPOSITORY_SERVER = {
-    "alias": "REPO",
-    "host": "10.10.1.100",     # 점검결과를 적재할 중앙 repository SQL Server
-    "port": 1433,
-    "auth": "windows",               # SQL 인증이면 "sql" + user/password_env 지정 (SERVERS 와 동일 방식)
-    "user": None,
-    "password_env": None,
-    "trust_cert": True,
+# - python-oracledb 를 Thick 모드(Oracle Instant Client 사용)로 접속한다.  설치: pip install oracledb
+# - 테이블 DDL 은 create_repository_table.sql 참고.
+# - 같은 날 다시 실행하면 그날 해당 서버의 기존 결과를 지우고 새 결과로 교체한다 (중복 적재 방지).
+# - 비밀번호는 환경변수(REPO_PASSWORD_ENV)에서 읽는다. 코드/저장소에 넣지 않는다.
+ORACLE_CLIENT_DIR = r"C:\Oracle\instantclient_19_30"
+REPOSITORY = {
+    "host": "10.10.20.134",
+    "port": 1525,
+    "service_name": "DIRST",
+    "user": "IRDMOW",
 }
-REPOSITORY_TABLE = "DBCHECK.dbo.DAILY_CHECK_RESULT"
+REPO_PASSWORD_ENV = "DCHECK_REPO_PASSWORD"
+REPOSITORY_TABLE = "IRDMOW.TB_MON_DB_MSSQL_DCHECK"
+
+DATETIME_COLUMNS = {"LAST_FULL_BACKUP_DT", "CHECK_DT"}
 
 
-def _sql_literal(value: Any) -> str:
-    """Python 값을 T-SQL 리터럴 문자열로 변환 (예시 구현, 운영 시 파라미터 바인딩 권장)."""
-    if value is None:
-        return "NULL"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value).replace("'", "''")
-    return f"N'{text}'"
+def _to_oracle_bind(row: dict[str, Any]) -> dict[str, Any]:
+    """결과 1행을 INSERT 바인드 값으로 변환 (일시 문자열 → datetime, CHECK_DATE 추가)."""
+    bind = {}
+    for col, _ in RESULT_COLUMNS:
+        v = row[col]
+        if col in DATETIME_COLUMNS and v:
+            v = datetime.strptime(v, "%Y-%m-%d %H:%M:%S")
+        bind[col] = v
+    bind["CHECK_DATE"] = bind["CHECK_DT"].strftime("%Y%m%d")
+    return bind
 
 
-def insert_results_to_repository(rows: list[dict[str, Any]], chunk_size: int = 200) -> None:
-    """점검결과를 중앙 저장소 테이블에 적재하는 예시.
-
-    - sqlcmd 로 일괄 INSERT 문을 실행한다 (대량일 때는 chunk_size 단위로 나눠 실행).
-    - 운영 적용 시: 컬럼명/타입을 실제 REPOSITORY_TABLE 스키마에 맞추고,
-      자격증명은 환경변수/비밀관리시스템에서 읽어오도록 교체할 것.
-    """
+def insert_results_to_repository(rows: list[dict[str, Any]]) -> None:
+    """점검결과를 Oracle 테이블에 적재한다. 실패 시 예외를 그대로 올린다 (전체 롤백)."""
     if not rows:
         return
 
-    columns = [
-        "server_alias", "host_name", "db_name", "biz_desc", "db_status",
-        "cluster_status", "shared_disk_status", "msdtc_status", "job_fail_check",
-        "buffer_cache_hit_ratio", "plan_cache_hit_ratio",
-        "engine_used_pct", "data_used_pct", "log_used_pct",
-        "last_full_backup_finished", "backup_duration", "backup_size_mb",
-        "long_running_check", "error_log_check", "checked_at",
-    ]
-    key_order = [
-        "서버번호", "호스트명", "DB명", "업무설명", "DB_상태", "클러스터_상태",
-        "공유디스크_상태", "MSDTC_상태", "Job_실패_점검",
-        "Buffer_Cache_Hit_Ratio(%)", "Plan_Cache_Hit_Ratio(%)",
-        "엔진영역_사용률(%)", "데이터파일영역_사용률(%)", "트랜잭션로그영역_사용률(%)",
-        "최근Full백업_완료일시", "백업_소요시간", "백업_사이즈(MB)",
-        "장시간쿼리_점검", "에러로그_점검", "점검일시",
-    ]
+    password = os.environ.get(REPO_PASSWORD_ENV)
+    if not password:
+        raise RuntimeError(f"환경변수 {REPO_PASSWORD_ENV} 에 적재 DB 비밀번호가 설정되어 있지 않습니다.")
 
-    for i in range(0, len(rows), chunk_size):
-        chunk = rows[i:i + chunk_size]
-        values_sql = ",\n".join(
-            "(" + ", ".join(_sql_literal(r[k]) for k in key_order) + ")"
-            for r in chunk
-        )
-        insert_sql = (
-            f"SET NOCOUNT ON;\n"
-            f"INSERT INTO {REPOSITORY_TABLE} ({', '.join(columns)})\n"
-            f"VALUES\n{values_sql};"
-        )
-        # -Q 로 넘기면 Windows 명령줄 길이 한도(32,767자)를 넘을 수 있으므로(80행이면 이미 초과)
-        # UTF-8 임시 파일에 써서 -i 로 실행한다 (-f 65001 로 UTF-8 로 읽힘).
-        with tempfile.NamedTemporaryFile("w", suffix=".sql", encoding="utf-8", delete=False) as tf:
-            tf.write(insert_sql)
-            sql_file = tf.name
-        try:
-            exec_sqlcmd(REPOSITORY_SERVER, ["-i", sql_file])
-            print(f"[REPO] {len(chunk)}건 적재 완료")
-        except Exception as e:
-            print(f"[REPO] INSERT 실패: {e}", file=sys.stderr)
-        finally:
-            os.remove(sql_file)
+    import oracledb  # 적재 시에만 필요하므로 지연 import (CSV 만 뽑을 때는 미설치여도 동작)
+
+    oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)   # Thick 모드
+    dsn = f"{REPOSITORY['host']}:{REPOSITORY['port']}/{REPOSITORY['service_name']}"
+
+    binds = [_to_oracle_bind(r) for r in rows]
+    columns = ["CHECK_DATE"] + [col for col, _ in RESULT_COLUMNS]
+    insert_sql = (
+        f"INSERT INTO {REPOSITORY_TABLE} ({', '.join(columns)}) "
+        f"VALUES ({', '.join(':' + c for c in columns)})"
+    )
+    delete_sql = f"DELETE FROM {REPOSITORY_TABLE} WHERE CHECK_DATE = :1 AND SERVER_ALIAS = :2"
+    delete_keys = sorted({(b["CHECK_DATE"], b["SERVER_ALIAS"]) for b in binds})
+
+    # with 블록을 commit 없이 빠져나가면(예외 포함) 연결 종료 시 자동 롤백된다
+    with oracledb.connect(user=REPOSITORY["user"], password=password, dsn=dsn) as conn:
+        with conn.cursor() as cur:
+            cur.executemany(delete_sql, delete_keys)
+            cur.executemany(insert_sql, binds)
+        conn.commit()
+    print(f"[REPO] {REPOSITORY_TABLE} {len(binds)}건 적재 완료")
 
 
 # ---------------------------------------------------------------------------
 # 7. 엔트리 포인트
 # ---------------------------------------------------------------------------
-def main() -> None:
+def main() -> int:
     rows = run_daily_check()
 
     out_dir = Path(__file__).parent
     out_path = out_dir / f"daily_check_{datetime.now():%Y%m%d_%H%M%S}.csv"
-    export_csv(rows, out_path)
+    export_csv(rows, out_path)   # 적재 실패에 대비해 CSV 는 항상 먼저 남긴다
 
-    # 중앙 저장소 적재는 기본적으로 비활성화 (예시 코드이므로 환경 맞춰 조정 후 주석 해제)
-    # insert_results_to_repository(rows)
+    try:
+        insert_results_to_repository(rows)
+    except Exception as e:
+        print(f"[REPO] 적재 실패 (CSV 는 저장됨: {out_path}): {e}", file=sys.stderr)
+        return 1   # 작업 스케줄러에서 실패로 감지되도록 0이 아닌 종료코드
 
     print(f"\n총 {len(rows)}개 DB 점검 완료.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

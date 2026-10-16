@@ -1,5 +1,5 @@
 {
-  "_설명": "SQL Server 는 Oracle/Mysql 처럼 외부에서 조회 가능한 '업무설명' 메타데이터가 기본 제공되지 않으므로, 서버(alias)+DB명 기준 매핑을 별도 파일로 관리합니다. 실제 사용 시 db_desc_map.json 으로 복사한 뒤 내용을 채우고 sql_server_daily_check.py 의 DB_DESC_MAP_PATH 를 그 파일로 지정하세요.",
+  "_설명": "SQL Server 는 Oracle/Mysql 처럼 외부에서 조회 가능한 '업무설명' 메타데이터가 기본 제공되지 않으므로, 서버(alias)+DB명 기준 매핑을 별도 파일로 관리합니다. 이 파일을 db_desc_map.json 으로 복사해서 채우면 스크립트가 그 파일을 우선 사용합니다. 매핑에 없는 DB 는 '입력 필요' 로 표시됩니다.",
   "SQLSVR1": {
     "DB01": "[운영] 계약관리",
     "DB02": "[운영] 고객정보"

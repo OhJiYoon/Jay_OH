@@ -2,9 +2,10 @@
 
 | 파일 | 설명 |
 |---|---|
-| `sql_server_daily_check.py` | 점검 스크립트 (sqlcmd 로 각 인스턴스 조회 → DB 단위 1행 CSV) |
-| `create_repository_table.sql` | 중앙 저장소 테이블 DDL |
-| `db_desc_map.sample.json` | 서버/DB별 업무설명 매핑 예시 |
+| `sql_server_daily_check.py` | 점검 스크립트 (sqlcmd 로 각 인스턴스 조회 → DB 단위 1행 → CSV 저장 + Oracle 적재) |
+| `create_repository_table.sql` | 적재 테이블 DDL (Oracle `IRDMOW.TB_MON_DB_MSSQL_DCHECK`) |
+| `select_mssql_dcheck_for_excel.sql` | 엑셀 출력 스크립트에 넣을 조회 쿼리 (타 DBMS 점검결과 시트와 같은 양식) |
+| `db_desc_map.sample.json` | 서버/DB별 업무설명 매핑 예시 (`db_desc_map.json` 으로 복사해서 사용, 매핑 없으면 '입력 필요') |
 | `daily_check_sample_20261016_090000.csv` | 결과 CSV 예시 |
 
 ## 실행 준비
@@ -16,7 +17,24 @@
    [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')
    ```
    스크립트는 이 값을 sqlcmd 의 `SQLCMDPASSWORD` 로만 넘기므로 명령줄(프로세스 목록)에 비밀번호가 보이지 않는다.
-3. `python sql_server_daily_check.py` 실행 → 같은 폴더에 `daily_check_YYYYMMDD_HHMMSS.csv` (UTF-8 BOM, Excel 에서 바로 열림)
+3. 결과 적재(Oracle `10.10.20.134:1525/DIRST`, 계정 `IRDMOW`) 준비
+   - Oracle Instant Client: `C:\Oracle\instantclient_19_30` (스크립트의 `ORACLE_CLIENT_DIR`)
+   - `pip install oracledb` (python-oracledb Thick 모드로 Instant Client 사용)
+   - 적재 계정 비밀번호 환경변수 설정
+     ```powershell
+     [Environment]::SetEnvironmentVariable('DCHECK_REPO_PASSWORD', '<비밀번호>', 'User')
+     ```
+   - `create_repository_table.sql` 로 테이블 생성 (최초 1회)
+4. `python sql_server_daily_check.py` 실행
+   - 같은 폴더에 `daily_check_YYYYMMDD_HHMMSS.csv` (UTF-8 BOM) 를 먼저 저장한 뒤 Oracle 에 적재
+   - 같은 날 재실행하면 그날 해당 서버의 결과를 지우고 새로 적재 (PK: 점검일자+서버번호+DB명)
+   - 적재 실패 시 종료코드 1 → 작업 스케줄러에서 실패로 확인 가능 (CSV 는 남음)
+
+## 엑셀 출력
+
+엑셀 출력은 기존 출력 스크립트에 `select_mssql_dcheck_for_excel.sql` 의 SELECT 를 추가해서 사용한다.
+정상 표기는 타 DBMS 시트와 같이 `정상 서비스`(서비스 상태) / `특이사항 없음`(점검 항목), 사용률은 소수 둘째 자리.
+한글 컬럼 별칭은 Oracle 12.2 이상에서 동작한다 (그 이하 버전은 30바이트 식별자 제한).
 
 ## 운영 영향(부하·지연) 검토
 

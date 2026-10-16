@@ -1,41 +1,67 @@
-﻿-- 일일점검결과 중앙 저장소 테이블 예시 DDL
--- sql_server_daily_check.py 의 insert_results_to_repository() 가 참조하는 스키마.
--- 실제 환경에 맞게 DB명/스키마/컬럼 타입을 조정해서 사용할 것.
+-- =============================================================================
+-- SQL Server 일일점검 결과 적재 테이블 (Oracle)
+--   대상 : IRDMOW.TB_MON_DB_MSSQL_DCHECK  (10.10.20.134:1525/DIRST)
+--   적재 : sql_server_daily_check.py 의 insert_results_to_repository()
+--   조회 : select_mssql_dcheck_for_excel.sql
+--
+-- 실행 시 주의
+--   - 한글 COMMENT 가 깨지지 않도록 SQL Developer 로 실행하거나,
+--     sqlplus 사용 시 NLS_LANG=KOREAN_KOREA.AL32UTF8 설정 후 실행 (이 파일은 BOM 없는 UTF-8).
+--   - 문자 컬럼은 CHAR 길이 기준(VARCHAR2(n CHAR)) → 한글도 n 글자까지 저장.
+--   - 테이블스페이스는 IRDMOW 기본 테이블스페이스 사용. 필요 시 TABLESPACE 절 추가.
+-- =============================================================================
 
-USE DBCHECK;
-GO
-
-IF OBJECT_ID('dbo.DAILY_CHECK_RESULT') IS NOT NULL
-    DROP TABLE dbo.DAILY_CHECK_RESULT;
-GO
-
-CREATE TABLE dbo.DAILY_CHECK_RESULT
+CREATE TABLE IRDMOW.TB_MON_DB_MSSQL_DCHECK
 (
-    id                          bigint IDENTITY(1,1) PRIMARY KEY,
-    server_alias                nvarchar(20)   NOT NULL,   -- SQLSVR1~4
-    host_name                   nvarchar(128)  NOT NULL,   -- @@SERVERNAME
-    db_name                     nvarchar(128)  NOT NULL,
-    biz_desc                    nvarchar(200)  NULL,
-    db_status                   nvarchar(50)   NULL,       -- 정상 / ONLINE 외 상태
-    cluster_status              nvarchar(20)   NULL,       -- 정상/비정상/단독서버
-    shared_disk_status          nvarchar(20)   NULL,
-    msdtc_status                nvarchar(20)   NULL,
-    job_fail_check               nvarchar(1000) NULL,       -- 정상 또는 실패잡 목록
-    buffer_cache_hit_ratio        decimal(5,1)   NULL,       -- Buffer Cache Hit Ratio(%), 서버 단위 broadcast
-    plan_cache_hit_ratio          decimal(5,1)   NULL,       -- Plan Cache Hit Ratio(%, Library Cache 대응), 서버 단위 broadcast
-    engine_used_pct              decimal(5,2)   NULL,       -- 엔진(설치) 영역 사용률(%), 서버 단위 broadcast
-    data_used_pct                decimal(5,2)   NULL,       -- 데이터파일 영역 사용률(%), DB 단위
-    log_used_pct                 decimal(5,2)   NULL,       -- 트랜잭션로그 영역 사용률(%), DB 단위
-    last_full_backup_finished   datetime       NULL,
-    backup_duration             varchar(100)   NULL,
-    backup_size_mb              float          NULL,
-    long_running_check           nvarchar(200)  NULL,
-    error_log_check              nvarchar(200)  NULL,
-    checked_at                  datetime       NOT NULL,
-    inserted_at                 datetime       NOT NULL DEFAULT GETDATE()
+    CHECK_DATE              VARCHAR2(8 CHAR)    NOT NULL,   -- 점검일자 YYYYMMDD
+    SERVER_ALIAS            VARCHAR2(20 CHAR)   NOT NULL,   -- 서버번호 (SQLSVR1~4)
+    DB_NAME                 VARCHAR2(128 CHAR)  NOT NULL,
+    HOST_NAME               VARCHAR2(128 CHAR)  NOT NULL,
+    INSTANCE_NAME           VARCHAR2(128 CHAR),
+    BIZ_DESC                VARCHAR2(200 CHAR),
+    DB_STATUS               VARCHAR2(50 CHAR),
+    CLUSTER_STATUS          VARCHAR2(50 CHAR),
+    ACTIVE_NODE             VARCHAR2(128 CHAR),
+    SHARED_DISK_STATUS      VARCHAR2(50 CHAR),
+    MSDTC_STATUS            VARCHAR2(50 CHAR),
+    ERROR_LOG_CHECK         VARCHAR2(200 CHAR),
+    BUFFER_CACHE_HIT_RATIO  NUMBER(5,2),
+    PLAN_CACHE_HIT_RATIO    NUMBER(5,2),
+    ENGINE_USED_PCT         NUMBER(5,2),
+    DATA_USED_PCT           NUMBER(5,2),
+    LOG_USED_PCT            NUMBER(5,2),
+    LAST_FULL_BACKUP_DT     DATE,
+    BACKUP_DURATION         VARCHAR2(100 CHAR),
+    BACKUP_SIZE_MB          NUMBER(15,2),
+    JOB_FAIL_CHECK          VARCHAR2(1000 CHAR),
+    LONG_RUNNING_CHECK      VARCHAR2(200 CHAR),
+    CHECK_DT                DATE                NOT NULL,
+    INS_DT                  DATE DEFAULT SYSDATE NOT NULL,
+    CONSTRAINT PK_TB_MON_DB_MSSQL_DCHECK PRIMARY KEY (CHECK_DATE, SERVER_ALIAS, DB_NAME)
 );
-GO
 
-CREATE INDEX IX_DAILY_CHECK_RESULT_checked_at
-    ON dbo.DAILY_CHECK_RESULT (checked_at, server_alias, db_name);
-GO
+COMMENT ON TABLE  IRDMOW.TB_MON_DB_MSSQL_DCHECK                        IS 'SQL Server 일일점검 결과 (DB 단위 1행)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.CHECK_DATE             IS '점검일자(YYYYMMDD)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.SERVER_ALIAS           IS '서버번호';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.DB_NAME                IS 'DB명 (접속실패 시 -)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.HOST_NAME              IS '호스트명 (MSFC 가상 네트워크명, 소문자)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.INSTANCE_NAME          IS '인스턴스명 (기본 인스턴스는 MSSQLSERVER)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.BIZ_DESC               IS '업무설명 (매핑 없으면 입력 필요)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.DB_STATUS              IS 'DBMS 서비스 (정상 서비스 / OFFLINE 등 / 점검실패)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.CLUSTER_STATUS         IS '클러스터(MSFC) 노드 상태';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.ACTIVE_NODE            IS '현재 Active 물리 노드';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.SHARED_DISK_STATUS     IS '클러스터 공유디스크 상태';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.MSDTC_STATUS           IS 'MSDTC 상태';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.ERROR_LOG_CHECK        IS 'ErrorLog 점검 (최근 1일)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.BUFFER_CACHE_HIT_RATIO IS 'Buffer Cache Hit Ratio(%) - 인스턴스 단위';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.PLAN_CACHE_HIT_RATIO   IS 'Plan Cache Hit Ratio(%) - Oracle Library Cache 대응, 인스턴스 단위';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.ENGINE_USED_PCT        IS '엔진(설치) 영역 사용률(%)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.DATA_USED_PCT          IS '데이터파일 영역 사용률(%)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.LOG_USED_PCT           IS '트랜잭션로그 영역 사용률(%)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.LAST_FULL_BACKUP_DT    IS '최근 Full 백업 완료일시';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.BACKUP_DURATION        IS '백업 소요시간';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.BACKUP_SIZE_MB         IS '백업 크기(MB)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.JOB_FAIL_CHECK         IS 'Agent Job 실패 점검';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.LONG_RUNNING_CHECK     IS '장시간 수행SQL 점검';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.CHECK_DT               IS '점검일시';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.INS_DT                 IS '적재일시';
