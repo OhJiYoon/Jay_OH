@@ -22,6 +22,8 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
    [Environment]::SetEnvironmentVariable('DCHECK_REPO_PASSWORD', '<IRDMOW 비밀번호>',   'User')  # 적재 Oracle
    ```
    작업 스케줄러로 돌릴 경우 작업을 실행하는 계정으로 설정하거나 `'Machine'` 범위로 설정한다.
+   설정 확인: `[Environment]::GetEnvironmentVariable('DBCHECK_PASSWORD','User')`
+   (이미 열려 있던 터미널/IDE 에는 새 값이 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다)
 4. **Oracle 적재**: Instant Client `C:\Oracle\instantclient_19_30`, python `oracledb` (설치됨).
    `create_repository_table.sql` 로 테이블 생성 (최초 1회).
 5. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.

@@ -89,6 +89,31 @@ REPOSITORY_TABLE = "IRDMOW.TB_MON_DB_MSSQL_DCHECK"
 # ---------------------------------------------------------------------------
 # 2. sqlcmd 실행
 # ---------------------------------------------------------------------------
+def get_secret(env_name: str) -> str:
+    """환경변수에서 비밀번호를 읽는다. 현재 프로세스에 없으면 Windows 레지스트리(사용자 → 시스템)에서 읽는다.
+    SetEnvironmentVariable 로 설정한 값은 설정 이전에 열린 터미널/IDE 에는 보이지 않기 때문."""
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    if sys.platform == "win32":
+        import winreg
+        for root, path in (
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ):
+            try:
+                with winreg.OpenKey(root, path) as key:
+                    value, _ = winreg.QueryValueEx(key, env_name)
+            except OSError:
+                continue
+            if value:
+                return value
+    raise RuntimeError(
+        f"환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다. "
+        f"확인: [Environment]::GetEnvironmentVariable('{env_name}','User') (README '실행 준비' 3번)"
+    )
+
+
 def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
     args = [
         SQLCMD_PATH,
@@ -116,12 +141,7 @@ def build_sqlcmd_env(server: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     if server.get("auth") != "windows":
         env_name = server.get("password_env", DB_PASSWORD_ENV)
-        password = os.environ.get(env_name)
-        if not password:
-            raise RuntimeError(
-                f"[{server['alias']}] 환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다."
-            )
-        env["SQLCMDPASSWORD"] = password
+        env["SQLCMDPASSWORD"] = get_secret(env_name)
     return env
 
 
@@ -565,9 +585,7 @@ def insert_results_to_repository(rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
 
-    password = os.environ.get(REPO_PASSWORD_ENV)
-    if not password:
-        raise RuntimeError(f"환경변수 {REPO_PASSWORD_ENV} 에 적재 DB 비밀번호가 설정되어 있지 않습니다.")
+    password = get_secret(REPO_PASSWORD_ENV)
 
     import oracledb
 
