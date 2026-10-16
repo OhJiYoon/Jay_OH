@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+daily_check_[0-9]*.csv
+db_desc_map.json
