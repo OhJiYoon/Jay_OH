@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import getpass
 import json
 import os
 import subprocess
@@ -95,22 +96,41 @@ def get_secret(env_name: str) -> str:
     value = os.environ.get(env_name)
     if value:
         return value
+
+    checked = ["프로세스 환경변수: 없음"]
+    similar = {k for k in os.environ if "PASSWORD" in k.upper()}
     if sys.platform == "win32":
         import winreg
-        for root, path in (
-            (winreg.HKEY_CURRENT_USER, r"Environment"),
-            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        for label, root, path in (
+            ("사용자 레지스트리", winreg.HKEY_CURRENT_USER, r"Environment"),
+            ("시스템 레지스트리", winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
         ):
             try:
                 with winreg.OpenKey(root, path) as key:
-                    value, _ = winreg.QueryValueEx(key, env_name)
-            except OSError:
+                    i = 0
+                    while True:
+                        try:
+                            name, data, _ = winreg.EnumValue(key, i)
+                        except OSError:
+                            break
+                        if name.upper() == env_name.upper() and data:
+                            return data
+                        if "PASSWORD" in name.upper():
+                            similar.add(name)
+                        i += 1
+            except OSError as e:
+                checked.append(f"{label}: 열기 실패({e})")
                 continue
-            if value:
-                return value
+            checked.append(f"{label}: 없음")
+    else:
+        checked.append(f"레지스트리: 미조회(Windows 기본 Python 아님, sys.platform={sys.platform})")
+
     raise RuntimeError(
-        f"환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다. "
-        f"확인: [Environment]::GetEnvironmentVariable('{env_name}','User') (README '실행 준비' 3번)"
+        f"환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다.\n"
+        f"  실행 계정: {getpass.getuser()} / Python: {sys.executable}\n"
+        f"  조회 결과: {'; '.join(checked)}\n"
+        f"  PASSWORD 가 들어간 변수명: {sorted(repr(n) for n in similar) or '없음'}\n"
+        f"  위 실행 계정으로 [Environment]::GetEnvironmentVariable('{env_name}','User') 확인 (README '실행 준비' 3번)"
     )
 
 
