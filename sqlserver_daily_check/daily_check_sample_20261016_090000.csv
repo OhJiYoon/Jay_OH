@@ -1,4 +1,4 @@
-﻿서버번호,호스트명,DB명,인스턴스명,업무설명,DBMS 서비스,클러스터(MSFC) 상태,Active 노드,공유디스크 상태,MSDTC 상태,ErrorLog,Buffer Cache Hit Ratio,Plan Cache Hit Ratio,엔진 영역(80%이하),데이터 영역(95%이하),트랜잭션로그 영역(80%이하),데이터백업(Full),백업 소요시간,백업 크기(MB),Agent Job 점검,장시간 수행SQL 점검,점검일시
+﻿서버번호,호스트명,DB명,인스턴스명,업무설명,DBMS 서비스,클러스터(MSFC) 상태,Active 노드,공유디스크 상태,MSDTC 상태,ErrorLog,Buffer Cache Hit Ratio(%),Plan Cache Hit Ratio(%),엔진 영역(%, 80%이하),데이터 영역(%, 95%이하),트랜잭션로그 영역(%, 80%이하),데이터백업(Full),백업 소요시간,백업 크기(MB),Agent Job 점검,장시간 수행SQL 점검,점검일시
 SQLSVR1,hlicopcordb01a,DB01,MSSQLSERVER,[운영] 계약관리,정상 서비스,특이사항 없음,hlicopcordb01a,특이사항 없음,특이사항 없음,특이사항 없음,99.6,87.3,45.2,62.1,30.4,2026-10-15 23:10:32,"0 hours, 12 minutes, 4 seconds",15234,특이사항 없음,특이사항 없음,2026-10-16 09:00:05
 SQLSVR1,hlicopcordb01a,DB02,MSSQLSERVER,[운영] 고객정보,정상 서비스,특이사항 없음,hlicopcordb01a,특이사항 없음,특이사항 없음,특이사항 없음,99.6,87.3,45.2,58.7,71.3,,확인필요,,특이사항 없음,특이사항 없음,2026-10-16 09:00:05
 SQLSVR1,hlicopcordb01a,DB03,MSSQLSERVER,[운영] 상품기준정보,정상 서비스,특이사항 없음,hlicopcordb01a,특이사항 없음,특이사항 없음,특이사항 없음,99.6,87.3,45.2,60.0,28.9,2026-10-15 23:22:10,"0 hours, 9 minutes, 41 seconds",8021,특이사항 없음,"1건, 최대 184초",2026-10-16 09:00:05
