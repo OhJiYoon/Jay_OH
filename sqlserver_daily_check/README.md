@@ -101,7 +101,7 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 | ErrorLog | 서버 | `xp_readerrorlog` 최근 1일. 오류/실패/교착/IO 지연/스택덤프 등 문제성 메시지만 집계하고 로그인 성공, DBCC 0 errors 등 정보성 메시지는 제외. `Error: 18456` 행과 뒤따르는 `Login failed` 행이 쌍으로 찍히므로 `Error:` 행은 건수에서 제외 |
 | Buffer / Plan Cache Hit Ratio | 서버 | `dm_os_performance_counters` 의 값/base 카운터 쌍으로 계산. Plan Cache 는 Oracle Library Cache Hit Ratio 대응 지표. 둘 다 인스턴스 전역 공유라 DB 단위로 나눌 수 없음 |
 | 엔진 영역 | 서버 | master 데이터파일이 있는 볼륨의 사용률 (설치 드라이브를 직접 알려주는 DMV 가 없어 근사치) |
-| 데이터 / 트랜잭션로그 영역 | DB | `dm_os_volume_stats` 로 DB 파일이 있는 볼륨의 사용률. 여러 볼륨이면 가장 높은 값. ONLINE DB 만 조회. 기존 `usp_daily_fixeddrives` 와 달리 OLE Automation 불필요 |
+| 데이터 / 트랜잭션로그 영역 | DB | `dm_os_volume_stats` 로 DB 파일이 있는 볼륨의 사용률. 여러 볼륨이면 가장 높은 값. ONLINE DB 만 조회. 기존 `usp_daily_fixeddrives` 와 달리 OLE Automation 불필요. **데이터 영역은 GROWTH 가 켜진(`sys.master_files.growth > 0`) 데이터파일이 있는 드라이브만** 본다 (드라이브가 차면 GROWTH 를 끄고 다른 드라이브에 새 파일을 만드는 운영 방식). GROWTH 켜진 데이터파일이 하나도 없으면 빈 값 |
 | 데이터백업(Full) | DB | `USP_DAILY_BACKUP_LIST`. 없으면 `확인필요` |
 | Agent Job 점검 | 서버 | `USP_DAILY_JOB_FAIL`. 실패 Job 은 `Job명(Step명)` 목록 |
 | 장시간 수행SQL 점검 | DB | `dm_exec_requests` 중 사용자 세션(`is_user_process`)만, 60초 초과. 점검 세션 자신과 WAITFOR / Service Broker 대기는 제외 |

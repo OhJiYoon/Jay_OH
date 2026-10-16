@@ -292,7 +292,7 @@ SELECT
 FROM sys.master_files mf
 JOIN sys.databases d ON d.database_id = mf.database_id
 CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
-WHERE mf.type_desc IN ('ROWS', 'LOG')
+WHERE (mf.type_desc = 'LOG' OR (mf.type_desc = 'ROWS' AND mf.growth > 0))   -- 데이터파일은 GROWTH 켜진 파일만
   AND mf.database_id > 4
   AND d.state_desc = 'ONLINE'
 FOR JSON PATH;
