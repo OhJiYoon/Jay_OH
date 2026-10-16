@@ -1,19 +1,8 @@
--- =============================================================================
--- SQL Server 일일점검 결과 적재 테이블 (Oracle)
---   대상 : IRDMOW.TB_MON_DB_MSSQL_DCHECK  (10.10.20.134:1525/DIRST)
---   적재 : sql_server_daily_check.py 의 insert_results_to_repository()
---   조회 : select_mssql_dcheck_for_excel.sql
---
--- 실행 시 주의
---   - 한글 COMMENT 가 깨지지 않도록 SQL Developer 로 실행하거나,
---     sqlplus 사용 시 NLS_LANG=KOREAN_KOREA.AL32UTF8 설정 후 실행 (이 파일은 BOM 없는 UTF-8).
---   - 문자 컬럼은 CHAR 길이 기준(VARCHAR2(n CHAR)) → 한글도 n 글자까지 저장.
---   - 테이블스페이스는 IRDMOW 기본 테이블스페이스 사용. 필요 시 TABLESPACE 절 추가.
--- =============================================================================
+-- SQL Server 일일점검 결과 적재 테이블 (설명은 README.md 참고)
 
 CREATE TABLE IRDMOW.TB_MON_DB_MSSQL_DCHECK
 (
-    CHECK_DATE              VARCHAR2(8 CHAR)    NOT NULL,   -- 점검일자 YYYYMMDD
+    REG_DT                  VARCHAR2(8 CHAR)    NOT NULL,   -- 점검일자 YYYYMMDD
     SERVER_ALIAS            VARCHAR2(20 CHAR)   NOT NULL,   -- 서버번호 (SQLSVR1~4)
     DB_NAME                 VARCHAR2(128 CHAR)  NOT NULL,
     HOST_NAME               VARCHAR2(128 CHAR)  NOT NULL,
@@ -37,14 +26,14 @@ CREATE TABLE IRDMOW.TB_MON_DB_MSSQL_DCHECK
     LONG_RUNNING_CHECK      VARCHAR2(200 CHAR),
     CHECK_DT                DATE                NOT NULL,
     INS_DT                  DATE DEFAULT SYSDATE NOT NULL,
-    CONSTRAINT PK_TB_MON_DB_MSSQL_DCHECK PRIMARY KEY (CHECK_DATE, SERVER_ALIAS, DB_NAME)
+    CONSTRAINT PK_TB_MON_DB_MSSQL_DCHECK PRIMARY KEY (REG_DT, SERVER_ALIAS, DB_NAME)
 );
 
 COMMENT ON TABLE  IRDMOW.TB_MON_DB_MSSQL_DCHECK                        IS 'SQL Server 일일점검 결과 (DB 단위 1행)';
-COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.CHECK_DATE             IS '점검일자(YYYYMMDD)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.REG_DT                 IS '점검일자(YYYYMMDD)';
 COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.SERVER_ALIAS           IS '서버번호';
 COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.DB_NAME                IS 'DB명 (접속실패 시 -)';
-COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.HOST_NAME              IS '호스트명 (MSFC 가상 네트워크명, 소문자)';
+COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.HOST_NAME              IS '호스트명 (현재 서비스 중인 물리 노드명, 소문자)';
 COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.INSTANCE_NAME          IS '인스턴스명 (기본 인스턴스는 MSSQLSERVER)';
 COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.BIZ_DESC               IS '업무설명 (매핑 없으면 입력 필요)';
 COMMENT ON COLUMN IRDMOW.TB_MON_DB_MSSQL_DCHECK.DB_STATUS              IS 'DBMS 서비스 (정상 서비스 / OFFLINE 등 / 점검실패)';

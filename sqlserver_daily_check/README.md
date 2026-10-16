@@ -1,47 +1,113 @@
 # SQL Server 일일점검 자동화
 
+sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속해 점검 쿼리를 실행하고,
+결과를 타 DBMS 일일점검결과와 같은 **DB 단위 1행** 형식으로 만들어 CSV 저장 + Oracle 적재한다.
+
 | 파일 | 설명 |
 |---|---|
-| `sql_server_daily_check.py` | 점검 스크립트 (sqlcmd 로 각 인스턴스 조회 → DB 단위 1행 → CSV 저장 + Oracle 적재) |
+| `sql_server_daily_check.py` | 점검 스크립트 |
 | `create_repository_table.sql` | 적재 테이블 DDL (Oracle `IRDMOW.TB_MON_DB_MSSQL_DCHECK`) |
-| `select_mssql_dcheck_for_excel.sql` | 엑셀 출력 스크립트에 넣을 조회 쿼리 (타 DBMS 점검결과 시트와 같은 양식) |
-| `db_desc_map.sample.json` | 서버/DB별 업무설명 매핑 예시 (`db_desc_map.json` 으로 복사해서 사용, 매핑 없으면 '입력 필요') |
+| `select_mssql_dcheck_for_excel.sql` | 엑셀 출력 스크립트에 넣을 조회 쿼리 |
+| `db_desc_map.sample.json` | 서버/DB별 업무설명 매핑 예시 |
 | `daily_check_sample_20261016_090000.csv` | 결과 CSV 예시 |
 
 ## 실행 준비
 
-1. 실행 서버에 `sqlcmd` 설치 (`sqlcmd -?` 로 확인)
-2. 접속 계정은 `LOGADMIN` (SQL 인증). **비밀번호는 코드/저장소에 넣지 않고** 실행 계정의 환경변수로 설정한다.
+1. **sqlcmd 설치** (`sqlcmd -?` 로 확인). 없으면 "Microsoft Command Line Utilities for SQL Server" 또는 `winget install sqlcmd`.
+2. **점검대상 프로시저**: 각 인스턴스 master DB 에 `USP_DAILY_JOB_FAIL`, `USP_DAILY_BACKUP_LIST` 가 배포되어 있어야 한다 (sp_daily.sql).
+3. **비밀번호 환경변수** (코드/저장소에는 비밀번호를 넣지 않는다)
    ```powershell
-   # 값에 $ 가 있으므로 반드시 작은따옴표 사용
-   [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')
+   # 값에 $ 가 있으므로 반드시 작은따옴표
+   [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD',     '<LOGADMIN 비밀번호>', 'User')  # 점검대상 SQL Server
+   [Environment]::SetEnvironmentVariable('DCHECK_REPO_PASSWORD', '<IRDMOW 비밀번호>',   'User')  # 적재 Oracle
    ```
-   스크립트는 이 값을 sqlcmd 의 `SQLCMDPASSWORD` 로만 넘기므로 명령줄(프로세스 목록)에 비밀번호가 보이지 않는다.
-3. 결과 적재(Oracle `10.10.20.134:1525/DIRST`, 계정 `IRDMOW`) 준비
-   - Oracle Instant Client: `C:\Oracle\instantclient_19_30` (스크립트의 `ORACLE_CLIENT_DIR`)
-   - `pip install oracledb` (python-oracledb Thick 모드로 Instant Client 사용)
-   - 적재 계정 비밀번호 환경변수 설정
-     ```powershell
-     [Environment]::SetEnvironmentVariable('DCHECK_REPO_PASSWORD', '<비밀번호>', 'User')
-     ```
-   - `create_repository_table.sql` 로 테이블 생성 (최초 1회)
-4. `python sql_server_daily_check.py` 실행
-   - 같은 폴더에 `daily_check_YYYYMMDD_HHMMSS.csv` (UTF-8 BOM) 를 먼저 저장한 뒤 Oracle 에 적재
-   - 같은 날 재실행하면 그날 해당 서버의 결과를 지우고 새로 적재 (PK: 점검일자+서버번호+DB명)
-   - 적재 실패 시 종료코드 1 → 작업 스케줄러에서 실패로 확인 가능 (CSV 는 남음)
+   작업 스케줄러로 돌릴 경우 작업을 실행하는 계정으로 설정하거나 `'Machine'` 범위로 설정한다.
+4. **Oracle 적재**: Instant Client `C:\Oracle\instantclient_19_30`, python `oracledb` (설치됨).
+   `create_repository_table.sql` 로 테이블 생성 (최초 1회).
+5. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.
+   `db_desc_map.json` 이 있으면 그 파일을, 없으면 샘플을 사용한다. 매핑에 없는 DB 는 `입력 필요` 로 표시된다.
+   (SQL Server 는 Oracle/MySQL 처럼 조회 가능한 업무설명 메타데이터가 없어서 파일로 관리)
+
+## 실행
+
+```
+python sql_server_daily_check.py
+```
+
+1. 4대 서버를 순서대로 점검
+2. `daily_check_YYYYMMDD_HHMMSS.csv` 저장 (UTF-8 BOM → Windows Excel 에서 한글 정상)
+3. Oracle 적재: 같은 `REG_DT`(점검일자)+서버의 기존 결과를 지우고 새로 INSERT → 같은 날 재실행해도 중복 없음.
+   실패 시 전체 롤백, 종료코드 1 (작업 스케줄러에서 실패 확인 가능, CSV 는 남음)
+
+## 설정 (스크립트 상단)
+
+| 항목 | 값 | 설명 |
+|---|---|---|
+| `SERVERS` | SQLSVR1~4 | 서버 추가 시 IP/PORT 만 추가. DB 목록은 `sys.databases` 에서 자동 조회 |
+| `DB_LOGIN_USER` | `LOGADMIN` | SQL 인증 계정 |
+| `REPOSITORY` | `10.10.20.134:1525/DIRST`, `IRDMOW` | 적재 Oracle (19c) |
+| `SQLCMD_LOGIN_TIMEOUT_SEC` / `SQLCMD_QUERY_TIMEOUT_SEC` | 15 / 30 | sqlcmd `-l` / `-t` |
+| `SQLCMD_TIMEOUT_SEC` | 60 | sqlcmd 프로세스 강제종료 한도 (최후 안전장치) |
+| `LONG_RUNNING_THRESHOLD_SEC` | 60 | 장시간 수행SQL 기준 |
+| `ERRORLOG_LOOKBACK_DAYS` | 1 | 에러로그 조회 기간 |
+| `ERRORLOG_MAX_SIZE_MB` | 100 | 현재 에러로그가 이보다 크면 읽지 않음 |
+
+## 점검 항목
+
+서버(인스턴스) 단위 항목은 그 서버의 모든 DB 행에 같은 값으로 들어가고, DB 단위 항목은 DB별로 채워진다.
+항목별로 독립 실행하므로 한 항목이 실패해도(프로시저 미배포, 타임아웃 등) 그 칸만 `점검실패` 로 표시하고 계속 진행한다.
+서버 접속 자체가 실패하면 그 서버는 `DB명 = -`, `DBMS 서비스 = 점검실패` 1행으로 남긴다.
+
+| 결과 컬럼 | 단위 | 방법 |
+|---|---|---|
+| 호스트명 / Active 노드 | 서버 | `SERVERPROPERTY('ComputerNamePhysicalNetBIOS')` - 현재 서비스 중인 물리 노드명(소문자). 페일오버 시 바뀐다 |
+| 인스턴스명 | 서버 | `SERVERPROPERTY('InstanceName')`, 기본 인스턴스는 `MSSQLSERVER` |
+| DBMS 서비스 | DB | `sys.databases.state_desc`. ONLINE=`정상 서비스`, 그 외(OFFLINE, SUSPECT, RECOVERY_PENDING 등)는 상태값 그대로 |
+| 클러스터 / 공유디스크 / MSDTC | 서버 | `dm_os_cluster_nodes`, `dm_io_cluster_shared_drives`, 빈 분산 트랜잭션 시작/커밋. 미클러스터는 `해당없음`. 기존 `usp_Cluster_Status` 는 결과셋이 3개라 한 번에 받기 어려워 같은 로직을 1행으로 재구성 |
+| ErrorLog | 서버 | `xp_readerrorlog` 최근 1일. 오류/실패/교착/IO 지연/스택덤프 등 문제성 메시지만 집계하고 로그인 성공, DBCC 0 errors 등 정보성 메시지는 제외. `Error: 18456` 행과 뒤따르는 `Login failed` 행이 쌍으로 찍히므로 `Error:` 행은 건수에서 제외 |
+| Buffer / Plan Cache Hit Ratio | 서버 | `dm_os_performance_counters` 의 값/base 카운터 쌍으로 계산. Plan Cache 는 Oracle Library Cache Hit Ratio 대응 지표. 둘 다 인스턴스 전역 공유라 DB 단위로 나눌 수 없음 |
+| 엔진 영역 | 서버 | master 데이터파일이 있는 볼륨의 사용률 (설치 드라이브를 직접 알려주는 DMV 가 없어 근사치) |
+| 데이터 / 트랜잭션로그 영역 | DB | `dm_os_volume_stats` 로 DB 파일이 있는 볼륨의 사용률. 여러 볼륨이면 가장 높은 값. ONLINE DB 만 조회. 기존 `usp_daily_fixeddrives` 와 달리 OLE Automation 불필요 |
+| 데이터백업(Full) | DB | `USP_DAILY_BACKUP_LIST`. 없으면 `확인필요` |
+| Agent Job 점검 | 서버 | `USP_DAILY_JOB_FAIL`. 실패 Job 은 `Job명(Step명)` 목록 |
+| 장시간 수행SQL 점검 | DB | `dm_exec_requests` 중 사용자 세션(`is_user_process`)만, 60초 초과. 점검 세션 자신과 WAITFOR / Service Broker 대기는 제외 |
+
+정상 표기는 타 DBMS 시트와 같이 서비스 상태는 `정상 서비스`, 점검 항목은 `특이사항 없음`, 비율/사용률은 소수 둘째 자리.
+
+## Oracle 적재 테이블
+
+`IRDMOW.TB_MON_DB_MSSQL_DCHECK` - PK `(REG_DT, SERVER_ALIAS, DB_NAME)`
+
+- `REG_DT` 는 점검일자 `YYYYMMDD` (VARCHAR2), `CHECK_DT` 는 점검일시 (DATE)
+- 문자 컬럼은 `VARCHAR2(n CHAR)` → 한글도 n 글자까지 저장
+- DDL 의 한글 COMMENT 가 깨지지 않도록 SQL Developer 로 실행하거나, sqlplus 는 `NLS_LANG=KOREAN_KOREA.AL32UTF8` 설정 후 실행
+- 접속은 python-oracledb Thick 모드(Instant Client). Instant Client 19 는 Python 과 비트수(64/32)가 같아야 하고 VC++ 2017 재배포 패키지가 필요
 
 ## 엑셀 출력
 
-엑셀 출력은 기존 출력 스크립트에 `select_mssql_dcheck_for_excel.sql` 의 SELECT 를 추가해서 사용한다.
-정상 표기는 타 DBMS 시트와 같이 `정상 서비스`(서비스 상태) / `특이사항 없음`(점검 항목), 사용률은 소수 둘째 자리.
-한글 컬럼 별칭은 Oracle 12.2 이상에서 동작한다 (그 이하 버전은 30바이트 식별자 제한).
+기존 엑셀 출력 스크립트에 `select_mssql_dcheck_for_excel.sql` 의 SELECT 를 추가해서 사용한다.
+
+- 기본은 오늘(`REG_DT = TO_CHAR(SYSDATE, 'YYYYMMDD')`). 다른 날짜는 `REG_DT = :REG_DT` 바인드로 변경
+- **맥스게이지 프로세스** 는 별도 페이지에서 직접 확인하므로 `특이사항 없음` 고정값으로 출력
+- 끝에 세미콜론 없음 (스크립트에서 실행하기 위함)
+
+## 한글 인코딩
+
+- sqlcmd 는 한글 Windows 에서 기본 CP949 로 출력하므로 `-f 65001` 로 UTF-8 고정 (미지정 시 결과 한글 깨짐)
+- CSV 는 BOM 포함 UTF-8 (BOM 없으면 Excel 이 CP949 로 읽어 깨짐)
+- 업무설명 JSON 은 BOM 유무 상관없이 읽음 (메모장 저장본 대응)
+
+## 보안
+
+- 비밀번호는 환경변수로만 받는다. sqlcmd 에는 `-P` 대신 `SQLCMDPASSWORD` 환경변수로 넘겨 프로세스 목록에 노출되지 않는다.
+- Oracle 은 바인드 변수로 INSERT 한다.
 
 ## 운영 영향(부하·지연) 검토
 
 점검은 **조회 전용**이다. 사용자 DB 에 쓰기/DDL/DBCC/인덱스 작업은 없고, tempdb 에 임시테이블(#)만 만들었다 지운다.
 서버당 sqlcmd 접속 9회를 순차 실행하며, 각 쿼리는 시스템 뷰·DMV 위주라 대부분 수 ms~수백 ms 수준이다.
 
-모든 쿼리에 다음 안전장치를 적용했다.
+모든 쿼리 앞에 다음 세션 설정과 타임아웃을 적용한다 (`SESSION_SAFETY_SQL`).
 
 | 장치 | 효과 |
 |---|---|
@@ -56,7 +122,7 @@
 | 항목 | 위험 | 내용 / 조치 |
 |---|---|---|
 | DB 목록, 디스크(`dm_os_volume_stats`), 성능카운터, 장시간쿼리(`dm_exec_requests`) | 낮음 | 메모리상 DMV 조회 |
-| 에러로그(`xp_readerrorlog`) | **중간** | 날짜 필터를 줘도 파일 전체를 읽음. 에러로그가 재순환되지 않아 수백MB~GB 면 CPU/IO 부하 → 100MB 초과 시 미조회하고 "로그 과대" 로 보고. **`sp_cycle_errorlog` 를 주 1회 등 정기 실행 권장** |
+| 에러로그(`xp_readerrorlog`) | **중간** | 날짜 필터를 줘도 파일 전체를 읽음. 에러로그가 재순환되지 않아 수백MB~GB 면 CPU/IO 부하 → 먼저 `xp_enumerrorlogs` 로 크기를 보고 100MB 초과 시 미조회, "로그 과대" 로 보고. **`sp_cycle_errorlog` 를 주 1회 등 정기 실행 권장** |
 | MSDTC(`BEGIN DISTRIBUTED TRANSACTION`) | 낮음~중간 | 클러스터 인스턴스에서만 실행. 빈 분산 트랜잭션을 열었다 커밋하며 데이터 잠금은 없음. MSDTC 서비스가 응답하지 않으면 대기가 생길 수 있으나 `-t 30` 으로 끊김 |
 | `USP_DAILY_JOB_FAIL`, `USP_DAILY_BACKUP_LIST` | **확인 필요** | 프로시저 본문(sp_daily.sql)을 아직 검토하지 못함. msdb 이력(`backupset`, `sysjobhistory`)이 정리되지 않아 매우 크면 조회가 느릴 수 있음 → `sp_delete_backuphistory` 정기 실행 여부 확인 |
 
