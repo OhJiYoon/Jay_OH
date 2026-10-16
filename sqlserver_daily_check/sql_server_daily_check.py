@@ -98,8 +98,10 @@ def load_config(path: Path) -> dict[str, Any]:
 
     sqlcmd_path = resolve_sqlcmd(cfg.get("sqlcmd_path"))
     login = cfg.get("sql_login", {})
+    common_excludes = cfg.get("exclude_dbs", [])
     cfg["servers"] = [
-        {"port": 1433, "auth": "sql", "trust_cert": True, **login, **server, "sqlcmd_path": sqlcmd_path}
+        {"port": 1433, "auth": "sql", "trust_cert": True, **login, **server, "sqlcmd_path": sqlcmd_path,
+         "exclude_dbs": [*common_excludes, *server.get("exclude_dbs", [])]}
         for server in cfg["servers"]
     ]
     cfg["output_dir"] = resolve_path(cfg["output_dir"]) if cfg.get("output_dir") else SCRIPT_DIR
@@ -502,6 +504,13 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
             "BIZ_DESC": "-", "DB_STATUS": FAIL, "CHECK_DT": checked_at,
         })
         return [row]
+
+    # 설정 파일 exclude_dbs 에 있는 DB 제외 (대소문자 무시)
+    excluded = {name.upper() for name in server.get("exclude_dbs", [])}
+    skipped = [db["database_name"] for db in databases if db["database_name"].upper() in excluded]
+    if skipped:
+        print(f"[{alias}] 점검 제외: {', '.join(skipped)}")
+    databases = [db for db in databases if db["database_name"].upper() not in excluded]
 
     # 항목별로 독립 실행: 실패한 항목만 '점검실패'
     def try_query(label: str, sql: str) -> list[dict[str, Any]] | None:

@@ -2,6 +2,7 @@
   "_설명": "이 파일을 dcheck_config.json 으로 복사해서 실제 값으로 수정하세요 (dcheck_config.json 은 배포/저장소에 포함되지 않음). password 의 INPUT_HERE 를 실제 비밀번호로 바꾸세요. 경로의 \\ 는 \\\\ 로 쓰거나 / 로 쓰세요. 항목 설명은 README '설정 파일' 참고.",
   "sqlcmd_path": "",
   "output_dir": "",
+  "exclude_dbs": [],
   "sql_login": {
     "user": "LOGADMIN",
     "password": "INPUT_HERE",

@@ -55,8 +55,9 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 |---|---|
 | `sqlcmd_path` | SQLCMD.EXE 전체 경로. **비워두면** PATH → `%ProgramFiles%\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn` → `%ProgramFiles%\Microsoft SQL Server\*\Tools\Binn` → `%ProgramFiles%\SqlCmd` 순서로 자동 탐색. 실행 시 첫 줄에 사용한 경로가 출력됨 |
 | `output_dir` | CSV 저장 폴더. 비우면 스크립트 폴더. 없으면 자동 생성 |
+| `exclude_dbs` | 점검에서 제외할 DB명 목록 (모든 서버 공통). 예) `["TESTDB", "DBA_WORK"]`. 대소문자 무시, 정확히 같은 이름만 제외. 서버별로 제외하려면 `servers` 의 해당 서버에 `"exclude_dbs": [...]` 를 넣는다 (공통 목록과 합쳐서 적용) |
 | `sql_login` | 점검대상 공통 SQL 인증 계정(`user`), 비밀번호(`password`), 비밀번호 미입력 시 읽을 환경변수 이름(`password_env`) |
-| `servers` | 점검대상 목록. `alias`, `host`, `port` 필수. 서버별로 `user`, `password`, `password_env`, `auth`(`sql`/`windows`), `trust_cert` 를 넣으면 공통값 대신 사용. DB 목록은 `sys.databases` 에서 자동 조회 |
+| `servers` | 점검대상 목록. `alias`, `host`, `port` 필수. 서버별로 `user`, `password`, `password_env`, `exclude_dbs`, `auth`(`sql`/`windows`), `trust_cert` 를 넣으면 공통값 대신 사용. DB 목록은 `sys.databases` 에서 자동 조회 |
 | `repository` | 적재 Oracle 접속정보, 비밀번호(`password`), 테이블명, Instant Client 경로(`oracle_client_dir`) |
 
 경로 작성 규칙
