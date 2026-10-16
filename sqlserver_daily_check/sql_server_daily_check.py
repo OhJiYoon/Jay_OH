@@ -19,6 +19,11 @@ SQL Server 일일점검 자동화 스크립트
 2) 각 대상 인스턴스에 sp_daily.sql 의 프로시저들(USP_DAILY_JOB_FAIL, USP_DAILY_BACKUP_LIST,
    usp_daily_fixeddrives)이 master DB에 배포되어 있어야 한다 (이미 운영 중인 것으로 가정).
 3) SERVERS 리스트에 접속정보(IP, PORT, 인증방식)를 채운다.
+   비밀번호는 코드에 넣지 않고, 실행 계정의 환경변수(기본 DBCHECK_PASSWORD)에서 읽어
+   sqlcmd 표준 환경변수 SQLCMDPASSWORD 로 전달한다 (명령줄 -P 미사용 → 프로세스 목록에 노출 안 됨).
+     - PowerShell (값에 $ 가 있으면 반드시 작은따옴표):
+         [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD', '<비밀번호>', 'User')
+     - 작업 스케줄러로 돌릴 경우 "작업을 실행할 계정"으로 로그인해서 설정하거나 'Machine' 범위로 설정.
 4) (선택) DB_DESC_MAP_PATH 에 지정한 JSON 파일로 "업무설명" 매핑을 관리한다.
    예시는 db_desc_map.sample.json 참고. 없으면 전부 '-' 로 표시된다.
 
@@ -33,8 +38,10 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -42,24 +49,28 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # 1. 점검대상 서버 목록 (여기에 IP/PORT 만 추가하면 됨)
 # ---------------------------------------------------------------------------
-# auth: "windows" (통합인증, sqlcmd -E) 또는 "sql" (SQL 인증, -U/-P)
+# auth: "windows" (통합인증, sqlcmd -E) 또는 "sql" (SQL 인증, -U + 환경변수 비밀번호)
+# password_env: 비밀번호를 담은 환경변수 이름 (비밀번호 자체는 절대 코드/저장소에 넣지 않는다)
+DB_LOGIN_USER = "LOGADMIN"
+DB_PASSWORD_ENV = "DBCHECK_PASSWORD"
+
 SERVERS: list[dict[str, Any]] = [
     {
         "alias": "SQLSVR1",          # 서버 식별자 (1~4번 서버)
         "host": "10.10.1.11",        # MSFC 리스너(가상 IP) 또는 AG 리스너 IP
         "port": 1433,
-        "auth": "windows",
-        "user": None,
-        "password": None,
+        "auth": "sql",
+        "user": DB_LOGIN_USER,
+        "password_env": DB_PASSWORD_ENV,
         "trust_cert": True,          # sqlcmd 18+ 에서 자체서명 인증서 신뢰(-C)
     },
     {
         "alias": "SQLSVR2",
         "host": "10.10.1.12",
         "port": 1433,
-        "auth": "windows",
-        "user": None,
-        "password": None,
+        "auth": "sql",
+        "user": DB_LOGIN_USER,
+        "password_env": DB_PASSWORD_ENV,
         "trust_cert": True,
     },
     {
@@ -67,8 +78,8 @@ SERVERS: list[dict[str, Any]] = [
         "host": "10.10.1.13",
         "port": 1433,
         "auth": "sql",
-        "user": "svc_dbcheck",
-        "password": "CHANGE_ME",     # 운영 적용 시 환경변수/Vault 등으로 분리 권장
+        "user": DB_LOGIN_USER,
+        "password_env": DB_PASSWORD_ENV,
         "trust_cert": True,
     },
     {
@@ -76,17 +87,31 @@ SERVERS: list[dict[str, Any]] = [
         "host": "10.10.1.14",
         "port": 1433,
         "auth": "sql",
-        "user": "svc_dbcheck",
-        "password": "CHANGE_ME",
+        "user": DB_LOGIN_USER,
+        "password_env": DB_PASSWORD_ENV,
         "trust_cert": True,
     },
 ]
 
 SQLCMD_PATH = "sqlcmd"                 # PATH 에 없으면 전체 경로로 변경
 DB_DESC_MAP_PATH = Path(__file__).with_name("db_desc_map.sample.json")
-SQLCMD_TIMEOUT_SEC = 60
+SQLCMD_LOGIN_TIMEOUT_SEC = 15         # sqlcmd -l : 접속 대기 한도
+SQLCMD_QUERY_TIMEOUT_SEC = 30         # sqlcmd -t : 서버측 쿼리 실행 한도 (초과 시 서버에서 정상 취소)
+SQLCMD_TIMEOUT_SEC = 60               # 파이썬 프로세스 강제종료 한도 (최후 안전장치)
 LONG_RUNNING_THRESHOLD_SEC = 60
 ERRORLOG_LOOKBACK_DAYS = 1
+ERRORLOG_MAX_SIZE_MB = 100            # 현재 에러로그가 이보다 크면 읽지 않음 (대용량 파일 읽기 부하 방지)
+
+# 모든 점검 쿼리 앞에 붙이는 세션 설정 (운영 업무에 영향을 주지 않기 위한 안전장치)
+# - READ UNCOMMITTED : msdb 이력/시스템 뷰 조회 시 공유잠금을 잡지 않아 운영 트랜잭션을 블로킹하지 않음
+# - LOCK_TIMEOUT 5초  : 혹시 잠금 대기가 생겨도 5초 후 포기 (무한 대기 방지)
+# - DEADLOCK_PRIORITY LOW : 교착 발생 시 업무 세션 대신 점검 세션이 희생됨
+SESSION_SAFETY_SQL = (
+    "SET NOCOUNT ON; "
+    "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; "
+    "SET LOCK_TIMEOUT 5000; "
+    "SET DEADLOCK_PRIORITY LOW;\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +128,8 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
         "-b",         # 에러 발생 시 0이 아닌 종료코드 반환
         "-f", "65001",  # 입출력 코드페이지를 UTF-8로 고정. 미지정 시 한글 Windows에서는 CP949(OEM)로
                         # 출력되어 utf-8 디코딩 시 한글(N'정상', 한글 Job명/DB명 등)이 깨진다.
+        "-l", str(SQLCMD_LOGIN_TIMEOUT_SEC),
+        "-t", str(SQLCMD_QUERY_TIMEOUT_SEC),
     ]
     if server.get("trust_cert", True):
         args.append("-C")
@@ -110,8 +137,46 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
     if server.get("auth") == "windows":
         args.append("-E")
     else:
-        args += ["-U", server["user"], "-P", server["password"]]
+        # 비밀번호는 -P 로 넘기지 않는다 (명령줄 인자는 작업관리자/프로세스 목록에 그대로 노출됨).
+        # -P 가 없으면 sqlcmd 는 환경변수 SQLCMDPASSWORD 를 사용한다 → build_sqlcmd_env() 참고.
+        args += ["-U", server["user"]]
     return args
+
+
+def build_sqlcmd_env(server: dict[str, Any]) -> dict[str, str]:
+    """sqlcmd 자식 프로세스에만 SQLCMDPASSWORD 를 넣어준다 (현재 프로세스 환경은 건드리지 않음)."""
+    env = os.environ.copy()
+    if server.get("auth") != "windows":
+        env_name = server.get("password_env", DB_PASSWORD_ENV)
+        password = os.environ.get(env_name)
+        if not password:
+            raise RuntimeError(
+                f"[{server['alias']}] 환경변수 {env_name} 에 비밀번호가 설정되어 있지 않습니다."
+            )
+        env["SQLCMDPASSWORD"] = password
+    return env
+
+
+def exec_sqlcmd(server: dict[str, Any], extra_args: list[str]) -> str:
+    """sqlcmd 를 실행하고 stdout 을 반환한다. 실패/타임아웃 시 RuntimeError."""
+    try:
+        proc = subprocess.run(
+            build_sqlcmd_args(server) + extra_args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=SQLCMD_TIMEOUT_SEC,
+            env=build_sqlcmd_env(server),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"[{server['alias']}] sqlcmd 응답 없음 ({SQLCMD_TIMEOUT_SEC}초 초과)") from e
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"[{server['alias']}] sqlcmd 실행 실패 (code={proc.returncode})\n"
+            f"STDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+        )
+    return proc.stdout
 
 
 def run_sqlcmd(server: dict[str, Any], sql: str) -> list[dict[str, Any]]:
@@ -120,23 +185,10 @@ def run_sqlcmd(server: dict[str, Any], sql: str) -> list[dict[str, Any]]:
     SQL Server는 FOR JSON 결과가 길면 여러 행(최대 2033자 단위)으로 쪼개서 반환하므로
     빈 줄/"(N rows affected)" 류의 꼬리 메시지를 제거한 뒤 이어붙여서 파싱해야 한다.
     """
-    args = build_sqlcmd_args(server)
-    proc = subprocess.run(
-        args + ["-Q", sql],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=SQLCMD_TIMEOUT_SEC,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"[{server['alias']}] sqlcmd 실행 실패 (code={proc.returncode})\n"
-            f"STDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
-        )
+    stdout = exec_sqlcmd(server, ["-Q", SESSION_SAFETY_SQL + sql])
 
     lines = []
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         s = line.strip()
         if not s:
             continue
@@ -164,7 +216,7 @@ SET NOCOUNT ON;
 SELECT name AS database_name, state_desc, recovery_model_desc
 FROM sys.databases
 WHERE database_id > 4            -- master/tempdb/model/msdb 제외
-  AND state_desc <> 'OFFLINE'
+-- OFFLINE/SUSPECT/RECOVERY_PENDING 등 비정상 상태도 그대로 가져와야 DB_상태 점검이 의미가 있음
 FOR JSON PATH;
 """
 
@@ -198,7 +250,12 @@ CREATE TABLE #bkp (
     backup_size_mb float
 );
 INSERT INTO #bkp EXEC master.dbo.USP_DAILY_BACKUP_LIST;
-SELECT * FROM #bkp FOR JSON PATH;
+-- FOR JSON 은 datetime 을 'YYYY-MM-DDTHH:MM:SS.fff' 로 내보내므로 엑셀 결과와 같은 'YYYY-MM-DD HH:MM:SS' 로 변환
+SELECT database_name,
+       CONVERT(varchar(19), backup_finished, 120) AS backup_finished,
+       total_time,
+       backup_size_mb
+FROM #bkp FOR JSON PATH;
 DROP TABLE #bkp;
 """
 
@@ -214,9 +271,11 @@ SELECT
     vs.volume_mount_point,
     CAST(100.0 * (vs.total_bytes - vs.available_bytes) / NULLIF(vs.total_bytes, 0) AS decimal(5,2)) AS used_pct
 FROM sys.master_files mf
+JOIN sys.databases d ON d.database_id = mf.database_id
 CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) vs
 WHERE mf.type_desc IN ('ROWS', 'LOG')
   AND mf.database_id > 4          -- master/tempdb/model/msdb 제외
+  AND d.state_desc = 'ONLINE'     -- 비ONLINE DB 파일은 볼륨 조회 대상에서 제외 (DB_상태 로 별도 표시)
 FOR JSON PATH;
 """
 
@@ -275,14 +334,53 @@ FOR JSON PATH;
 """
 
 # xp_readerrorlog 직접 호출 (sp_readerrorlog 는 필터 없이 전체 덤프라 자동화에 부적합)
+# - 부하 방지: xp_readerrorlog 는 날짜 필터를 줘도 파일 전체를 읽으므로, 에러로그가 재순환되지 않아
+#   수백MB~GB 로 커진 경우 CPU/IO 를 크게 쓴다. 먼저 xp_enumerrorlogs 로 현재 로그(0번) 크기를 보고
+#   ERRORLOG_MAX_SIZE_MB 를 넘으면 읽지 않고 "로그 과대" 로만 보고한다 (sp_cycle_errorlog 정기 실행 권장).
+# - 오탐 방지: 로그인 성공, 백업 성공, DBCC 0 errors 같은 정보성 메시지는 제외하고
+#   오류/실패/교착/IO 지연/스택덤프 등 문제성 메시지만 센다.
+# 결과는 서버당 요약 1행: log_size_mb, skipped, issue_cnt, login_fail_cnt, latest_msg
 SQL_ERROR_LOG = f"""
-SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#logs') IS NOT NULL DROP TABLE #logs;
+CREATE TABLE #logs (archive_no int, log_date nvarchar(50), log_size bigint);
+INSERT INTO #logs EXEC master.dbo.xp_enumerrorlogs 1;
+DECLARE @size_mb decimal(12,1) = (SELECT CAST(log_size / 1048576.0 AS decimal(12,1)) FROM #logs WHERE archive_no = 0);
+
+IF @size_mb > {ERRORLOG_MAX_SIZE_MB}
+BEGIN
+    SELECT @size_mb AS log_size_mb, 1 AS skipped, NULL AS issue_cnt, NULL AS login_fail_cnt, NULL AS latest_msg
+    FOR JSON PATH, INCLUDE_NULL_VALUES;
+    RETURN;
+END
+
 IF OBJECT_ID('tempdb..#log') IS NOT NULL DROP TABLE #log;
 CREATE TABLE #log (log_date datetime, process_info nvarchar(50), log_text nvarchar(max));
 DECLARE @start datetime = DATEADD(day, -{ERRORLOG_LOOKBACK_DAYS}, GETDATE());
 INSERT INTO #log EXEC master.dbo.xp_readerrorlog 0, 1, NULL, NULL, @start, NULL, N'desc';
-DELETE FROM #log WHERE log_text LIKE '%Logging SQL Server messages%';  -- 로그 시작 안내문 제외
-SELECT TOP 50 * FROM #log FOR JSON PATH;
+
+-- 문제성 메시지만 남김
+DELETE FROM #log
+WHERE NOT (   log_text LIKE '%Error:%'
+           OR log_text LIKE '%failed%'
+           OR log_text LIKE '%deadlock%'
+           OR log_text LIKE '%Stack Dump%'
+           OR log_text LIKE '%I/O requests taking longer%'
+           OR log_text LIKE '%corrupt%'
+           OR log_text LIKE '%insufficient%'
+           OR log_text LIKE '%not responding%'
+           OR log_text LIKE '%Non-yielding%')
+   OR log_text LIKE '%Login succeeded%'
+   OR log_text LIKE '%found 0 errors%'
+   OR log_text LIKE '%This is an informational message%';
+
+-- 'Error: 18456, Severity...' 행과 바로 뒤 'Login failed...' 행이 쌍으로 찍히므로 Error: 행은 건수에서 제외하고 본문 행만 센다
+SELECT
+    @size_mb AS log_size_mb,
+    0 AS skipped,
+    (SELECT COUNT(*) FROM #log WHERE log_text NOT LIKE 'Error:%') AS issue_cnt,
+    (SELECT COUNT(*) FROM #log WHERE log_text LIKE 'Login failed%') AS login_fail_cnt,
+    (SELECT TOP 1 LEFT(log_text, 80) FROM #log WHERE log_text NOT LIKE 'Error:%' ORDER BY log_date DESC) AS latest_msg
+FOR JSON PATH, INCLUDE_NULL_VALUES;
 DROP TABLE #log;
 """
 
@@ -306,15 +404,21 @@ FROM sys.dm_os_performance_counters
 FOR JSON PATH;
 """
 
+# 사용자 세션의 장시간 실행 요청만 집계.
+# - session_id > 50 은 시스템 세션 구분 기준으로 부정확(2005 이후 시스템 세션도 50 초과 가능) → is_user_process 사용
+# - 점검 세션 자신(@@SPID), 대기용 명령(WAITFOR, Service Broker 수신 대기 등)은 "쿼리가 느린 것"이 아니므로 제외
 SQL_LONG_RUNNING = f"""
-SET NOCOUNT ON;
 SELECT
     DB_NAME(r.database_id) AS database_name,
     MAX(r.total_elapsed_time) / 1000 AS max_elapsed_sec,
     COUNT(*) AS session_cnt
 FROM sys.dm_exec_requests r
-WHERE r.total_elapsed_time > {LONG_RUNNING_THRESHOLD_SEC * 1000}
-  AND r.session_id > 50
+JOIN sys.dm_exec_sessions s ON s.session_id = r.session_id
+WHERE s.is_user_process = 1
+  AND r.session_id <> @@SPID
+  AND r.total_elapsed_time > {LONG_RUNNING_THRESHOLD_SEC * 1000}
+  AND ISNULL(r.wait_type, '') NOT IN ('WAITFOR', 'BROKER_RECEIVE_WAITFOR', 'SP_SERVER_DIAGNOSTICS_SLEEP', 'XE_LIVE_TARGET_TVF')
+  AND r.command NOT IN ('WAITFOR', 'BROKER TASK STOP')
 GROUP BY DB_NAME(r.database_id)
 FOR JSON PATH;
 """
@@ -349,6 +453,24 @@ def build_disk_map(disk_rows: list[dict[str, Any]]) -> dict[str, dict[str, float
     return disk_map
 
 
+FAIL = "점검실패"
+
+
+def summarize_error_log(rows: list[dict[str, Any]] | None) -> str:
+    """SQL_ERROR_LOG 요약 1행을 '에러로그_점검' 칸 문자열로 변환 (DDL 컬럼 nvarchar(200) 이내)."""
+    if rows is None:
+        return FAIL
+    r = (rows or [{}])[0]
+    if r.get("skipped"):
+        return f"로그 과대({r.get('log_size_mb')}MB) - 미조회, 에러로그 재순환 필요"
+    cnt = r.get("issue_cnt") or 0
+    if cnt == 0:
+        return "특이사항 없음"
+    login_fail = r.get("login_fail_cnt") or 0
+    detail = f", 로그인실패 {login_fail}건" if login_fail else ""
+    return f"{cnt}건 발견(확인필요{detail}): {r.get('latest_msg') or ''}"[:200]
+
+
 def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, str]]) -> list[dict[str, Any]]:
     alias = server["alias"]
     checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -370,28 +492,43 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
             "장시간쿼리_점검": "-", "에러로그_점검": "-", "점검일시": checked_at,
         }]
 
-    # 서버(인스턴스) 레벨 지표는 한 번만 수집해서 모든 DB 행에 broadcast
-    cluster = (run_sqlcmd(server, SQL_CLUSTER_STATUS) or [{}])[0]
-    job_fail_rows = run_sqlcmd(server, SQL_JOB_FAIL)
-    job_fail_status = (
-        "정상" if not job_fail_rows
-        else "; ".join(f"{r['job_name']}({r['step_name']})" for r in job_fail_rows)
-    )
-    perf = (run_sqlcmd(server, SQL_PERF_COUNTERS) or [{}])[0]
+    # 서버(인스턴스) 레벨 지표는 한 번만 수집해서 모든 DB 행에 broadcast.
+    # 항목별로 독립 실행: 한 항목(예: 프로시저 미배포, 타임아웃)이 실패해도 해당 칸만 '점검실패' 로
+    # 표시하고 나머지 항목과 다음 서버 점검은 계속 진행한다.
+    def try_query(label: str, sql: str) -> list[dict[str, Any]] | None:
+        try:
+            return run_sqlcmd(server, sql)
+        except Exception as e:
+            print(f"[{alias}] {label} 점검 실패: {e}", file=sys.stderr)
+            return None
+
+    cluster_rows = try_query("클러스터", SQL_CLUSTER_STATUS)
+    cluster = (cluster_rows or [{}])[0]
+    cluster_default = FAIL if cluster_rows is None else "-"
+
+    job_fail_rows = try_query("Job 실패", SQL_JOB_FAIL)
+    if job_fail_rows is None:
+        job_fail_status = FAIL
+    elif not job_fail_rows:
+        job_fail_status = "정상"
+    else:
+        job_fail_status = "; ".join(f"{r['job_name']}({r['step_name']})" for r in job_fail_rows)
+
+    perf = (try_query("성능지표", SQL_PERF_COUNTERS) or [{}])[0]
     buffer_hit_ratio = ratio_pct(perf.get("buffer_hit_value"), perf.get("buffer_hit_base"))
     plan_hit_ratio = ratio_pct(perf.get("plan_hit_value"), perf.get("plan_hit_base"))
-    disk_rows = run_sqlcmd(server, SQL_DISK_BY_DB)
-    disk_map = build_disk_map(disk_rows)
-    engine_row = (run_sqlcmd(server, SQL_ENGINE_VOLUME) or [{}])[0]
-    engine_used_pct = engine_row.get("used_pct")
-    error_log_rows = run_sqlcmd(server, SQL_ERROR_LOG)
-    error_log_status = "특이사항 없음" if not error_log_rows else f"{len(error_log_rows)}건 발견(확인필요)"
-    long_running_rows = run_sqlcmd(server, SQL_LONG_RUNNING)
-    long_running_map = {r["database_name"]: r for r in long_running_rows}
+
+    disk_map = build_disk_map(try_query("DB 디스크", SQL_DISK_BY_DB) or [])
+    engine_used_pct = ((try_query("엔진 디스크", SQL_ENGINE_VOLUME) or [{}])[0]).get("used_pct")
+
+    error_log_status = summarize_error_log(try_query("에러로그", SQL_ERROR_LOG))
+
+    long_running_rows = try_query("장시간쿼리", SQL_LONG_RUNNING)
+    long_running_map = {r["database_name"]: r for r in long_running_rows or []}
 
     # DB 레벨 지표 (백업은 이미 DB 단위 결과)
-    backup_rows = run_sqlcmd(server, SQL_BACKUP_LIST)
-    backup_map = {r["database_name"]: r for r in backup_rows}
+    backup_rows = try_query("백업", SQL_BACKUP_LIST)
+    backup_map = {r["database_name"]: r for r in backup_rows or []}
 
     host_display = cluster.get("server_name") or server["host"]
     desc_map_for_server = db_desc_map.get(alias, {})
@@ -410,9 +547,9 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
             "DB명": dbname,
             "업무설명": desc_map_for_server.get(dbname, "-"),
             "DB_상태": "정상" if db["state_desc"] == "ONLINE" else db["state_desc"],
-            "클러스터_상태": cluster.get("cluster_status", "-"),
-            "공유디스크_상태": cluster.get("shared_disk_status", "-"),
-            "MSDTC_상태": cluster.get("msdtc_status", "-"),
+            "클러스터_상태": cluster.get("cluster_status", cluster_default),
+            "공유디스크_상태": cluster.get("shared_disk_status", cluster_default),
+            "MSDTC_상태": cluster.get("msdtc_status", cluster_default),
             "Job_실패_점검": job_fail_status,
             "Buffer_Cache_Hit_Ratio(%)": buffer_hit_ratio,
             "Plan_Cache_Hit_Ratio(%)": plan_hit_ratio,
@@ -420,10 +557,11 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
             "데이터파일영역_사용률(%)": data_used_pct,
             "트랜잭션로그영역_사용률(%)": log_used_pct,
             "최근Full백업_완료일시": backup["backup_finished"] if backup else None,
-            "백업_소요시간": backup["total_time"] if backup else "확인필요",
+            "백업_소요시간": backup["total_time"] if backup else (FAIL if backup_rows is None else "확인필요"),
             "백업_사이즈(MB)": backup["backup_size_mb"] if backup else None,
             "장시간쿼리_점검": (
-                "정상" if not longrun
+                FAIL if long_running_rows is None
+                else "정상" if not longrun
                 else f"{longrun['session_cnt']}건, 최대 {longrun['max_elapsed_sec']}초"
             ),
             "에러로그_점검": error_log_status,
@@ -468,9 +606,9 @@ REPOSITORY_SERVER = {
     "alias": "REPO",
     "host": "10.10.1.100",     # 점검결과를 적재할 중앙 repository SQL Server
     "port": 1433,
-    "auth": "windows",
+    "auth": "windows",               # SQL 인증이면 "sql" + user/password_env 지정 (SERVERS 와 동일 방식)
     "user": None,
-    "password": None,
+    "password_env": None,
     "trust_cert": True,
 }
 REPOSITORY_TABLE = "DBCHECK.dbo.DAILY_CHECK_RESULT"
@@ -524,15 +662,18 @@ def insert_results_to_repository(rows: list[dict[str, Any]], chunk_size: int = 2
             f"INSERT INTO {REPOSITORY_TABLE} ({', '.join(columns)})\n"
             f"VALUES\n{values_sql};"
         )
-        args = build_sqlcmd_args(REPOSITORY_SERVER)
-        proc = subprocess.run(
-            args + ["-Q", insert_sql],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-        if proc.returncode != 0:
-            print(f"[REPO] INSERT 실패: {proc.stderr}", file=sys.stderr)
-        else:
+        # -Q 로 넘기면 Windows 명령줄 길이 한도(32,767자)를 넘을 수 있으므로(80행이면 이미 초과)
+        # UTF-8 임시 파일에 써서 -i 로 실행한다 (-f 65001 로 UTF-8 로 읽힘).
+        with tempfile.NamedTemporaryFile("w", suffix=".sql", encoding="utf-8", delete=False) as tf:
+            tf.write(insert_sql)
+            sql_file = tf.name
+        try:
+            exec_sqlcmd(REPOSITORY_SERVER, ["-i", sql_file])
             print(f"[REPO] {len(chunk)}건 적재 완료")
+        except Exception as e:
+            print(f"[REPO] INSERT 실패: {e}", file=sys.stderr)
+        finally:
+            os.remove(sql_file)
 
 
 # ---------------------------------------------------------------------------
