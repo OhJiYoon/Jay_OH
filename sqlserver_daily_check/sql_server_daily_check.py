@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 import getpass
+import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -13,53 +15,13 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# 1. 설정
+# 1. 설정 - 접속정보는 dcheck_config.json (형식: dcheck_config.sample.json, 설명: README)
 # ---------------------------------------------------------------------------
-DB_LOGIN_USER = "LOGADMIN"
-DB_PASSWORD_ENV = "DBCHECK_PASSWORD"
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = SCRIPT_DIR / "dcheck_config.json"
+DB_DESC_MAP_PATH = SCRIPT_DIR / "db_desc_map.json"
+DB_DESC_MAP_SAMPLE_PATH = SCRIPT_DIR / "db_desc_map.sample.json"
 
-SERVERS: list[dict[str, Any]] = [
-    {
-        "alias": "SQLSVR1",
-        "host": "10.10.1.11",
-        "port": 1433,
-        "auth": "sql",              # "sql" 또는 "windows"
-        "user": DB_LOGIN_USER,
-        "password_env": DB_PASSWORD_ENV,
-        "trust_cert": True,         # sqlcmd -C
-    },
-    {
-        "alias": "SQLSVR2",
-        "host": "10.10.1.12",
-        "port": 1433,
-        "auth": "sql",
-        "user": DB_LOGIN_USER,
-        "password_env": DB_PASSWORD_ENV,
-        "trust_cert": True,
-    },
-    {
-        "alias": "SQLSVR3",
-        "host": "10.10.1.13",
-        "port": 1433,
-        "auth": "sql",
-        "user": DB_LOGIN_USER,
-        "password_env": DB_PASSWORD_ENV,
-        "trust_cert": True,
-    },
-    {
-        "alias": "SQLSVR4",
-        "host": "10.10.1.14",
-        "port": 1433,
-        "auth": "sql",
-        "user": DB_LOGIN_USER,
-        "password_env": DB_PASSWORD_ENV,
-        "trust_cert": True,
-    },
-]
-
-SQLCMD_PATH = "sqlcmd"
-DB_DESC_MAP_PATH = Path(__file__).with_name("db_desc_map.json")
-DB_DESC_MAP_SAMPLE_PATH = Path(__file__).with_name("db_desc_map.sample.json")
 SQLCMD_LOGIN_TIMEOUT_SEC = 15
 SQLCMD_QUERY_TIMEOUT_SEC = 30
 SQLCMD_TIMEOUT_SEC = 60
@@ -75,16 +37,70 @@ SESSION_SAFETY_SQL = (
     "SET DEADLOCK_PRIORITY LOW;\n"
 )
 
-# Oracle 적재
-ORACLE_CLIENT_DIR = r"C:\Oracle\instantclient_19_30"
-REPOSITORY = {
-    "host": "10.10.20.134",
-    "port": 1525,
-    "service_name": "DIRST",
-    "user": "IRDMOW",
-}
-REPO_PASSWORD_ENV = "DCHECK_REPO_PASSWORD"
-REPOSITORY_TABLE = "IRDMOW.TB_MON_DB_MSSQL_DCHECK"
+# sqlcmd_path 미지정 시 PATH 다음으로 찾아볼 위치 (Program Files 기준이라 설치 드라이브와 무관)
+SQLCMD_SEARCH_PATTERNS = [
+    "Microsoft SQL Server/Client SDK/ODBC/*/Tools/Binn/SQLCMD.EXE",
+    "Microsoft SQL Server/*/Tools/Binn/SQLCMD.EXE",
+    "SqlCmd/sqlcmd.exe",
+]
+
+
+def resolve_path(value: str) -> Path:
+    """%ProgramFiles% 같은 환경변수와 따옴표를 풀고, 상대경로는 실행 위치가 아닌 스크립트 폴더 기준으로 만든다."""
+    p = Path(os.path.expandvars(value.strip().strip('"')))
+    return p if p.is_absolute() else (SCRIPT_DIR / p).resolve()
+
+
+def resolve_sqlcmd(configured: str | None) -> str:
+    if configured and configured.strip():
+        configured = configured.strip().strip('"')
+        if any(c in configured for c in ("\\", "/", ":")):
+            p = resolve_path(configured)
+            if p.is_file():
+                return str(p)
+            raise RuntimeError(f"sqlcmd_path 에 지정한 파일이 없습니다: {p}")
+        found = shutil.which(configured)
+        if found:
+            return found
+        raise RuntimeError(f"sqlcmd_path '{configured}' 를 PATH 에서 찾을 수 없습니다. SQLCMD.EXE 전체 경로를 지정하세요.")
+
+    found = shutil.which("sqlcmd")
+    if found:
+        return found
+    bases = {os.environ.get(k) for k in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")} - {None}
+    for pattern in SQLCMD_SEARCH_PATTERNS:
+        for base in sorted(bases):
+            hits = sorted(Path(base).glob(pattern), reverse=True)   # 최신 버전 폴더 우선
+            if hits:
+                return str(hits[0])
+    raise RuntimeError("sqlcmd 를 찾을 수 없습니다. dcheck_config.json 의 sqlcmd_path 에 SQLCMD.EXE 전체 경로를 지정하세요.")
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(
+            f"설정 파일이 없습니다: {path}\n"
+            "dcheck_config.sample.json 을 dcheck_config.json 으로 복사해서 접속정보를 입력하세요."
+        )
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"설정 파일 형식 오류: {path} ({e})\n"
+            "경로의 \\ 는 \\\\ 로 두 번 쓰거나 / 로 쓰세요. 예) \"C:/Oracle/instantclient_19_30\""
+        ) from e
+
+    sqlcmd_path = resolve_sqlcmd(cfg.get("sqlcmd_path"))
+    login = cfg.get("sql_login", {})
+    cfg["servers"] = [
+        {"port": 1433, "auth": "sql", "trust_cert": True, **login, **server, "sqlcmd_path": sqlcmd_path}
+        for server in cfg["servers"]
+    ]
+    cfg["output_dir"] = resolve_path(cfg["output_dir"]) if cfg.get("output_dir") else SCRIPT_DIR
+    repo = cfg["repository"]
+    repo["oracle_client_dir"] = str(resolve_path(repo["oracle_client_dir"]))
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +152,11 @@ def get_secret(env_name: str) -> str:
 
 def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
     args = [
-        SQLCMD_PATH,
+        server["sqlcmd_path"],
         "-S", f"{server['host']},{server['port']}",
         "-d", "master",
         "-h", "-1",
-        "-W",
-        "-y", "0",
+        "-y", "0",       # -W 와 함께 쓸 수 없음 (같이 주면 sqlcmd 가 code=1 로 종료)
         "-b",
         "-f", "65001",   # UTF-8 입출력 (미지정 시 한글 깨짐)
         "-l", str(SQLCMD_LOGIN_TIMEOUT_SEC),
@@ -160,7 +175,7 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
 def build_sqlcmd_env(server: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     if server.get("auth") != "windows":
-        env_name = server.get("password_env", DB_PASSWORD_ENV)
+        env_name = server["password_env"]
         env["SQLCMDPASSWORD"] = get_secret(env_name)
     return env
 
@@ -557,10 +572,10 @@ def check_one_server(server: dict[str, Any], db_desc_map: dict[str, dict[str, st
     return rows
 
 
-def run_daily_check() -> list[dict[str, Any]]:
+def run_daily_check(servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     db_desc_map = load_db_desc_map()
     all_rows: list[dict[str, Any]] = []
-    for server in SERVERS:
+    for server in servers:
         print(f"[{server['alias']}] 점검 시작 ({server['host']}:{server['port']})")
         rows = check_one_server(server, db_desc_map)
         print(f"[{server['alias']}] 점검 완료: {len(rows)}개 DB")
@@ -600,46 +615,60 @@ def _to_oracle_bind(row: dict[str, Any]) -> dict[str, Any]:
     return bind
 
 
-def insert_results_to_repository(rows: list[dict[str, Any]]) -> None:
+def insert_results_to_repository(rows: list[dict[str, Any]], repo: dict[str, Any]) -> None:
     """같은 REG_DT+서버의 기존 결과를 지우고 적재한다. 실패 시 전체 롤백."""
     if not rows:
         return
 
-    password = get_secret(REPO_PASSWORD_ENV)
+    password = get_secret(repo["password_env"])
+    table = repo["table"]
 
     import oracledb
 
-    oracledb.init_oracle_client(lib_dir=ORACLE_CLIENT_DIR)   # Thick 모드
-    dsn = f"{REPOSITORY['host']}:{REPOSITORY['port']}/{REPOSITORY['service_name']}"
+    oracledb.init_oracle_client(lib_dir=repo["oracle_client_dir"])   # Thick 모드
+    dsn = f"{repo['host']}:{repo['port']}/{repo['service_name']}"
 
     binds = [_to_oracle_bind(r) for r in rows]
     columns = ["REG_DT"] + [col for col, _ in RESULT_COLUMNS]
     insert_sql = (
-        f"INSERT INTO {REPOSITORY_TABLE} ({', '.join(columns)}) "
+        f"INSERT INTO {table} ({', '.join(columns)}) "
         f"VALUES ({', '.join(':' + c for c in columns)})"
     )
-    delete_sql = f"DELETE FROM {REPOSITORY_TABLE} WHERE REG_DT = :1 AND SERVER_ALIAS = :2"
+    delete_sql = f"DELETE FROM {table} WHERE REG_DT = :1 AND SERVER_ALIAS = :2"
     delete_keys = sorted({(b["REG_DT"], b["SERVER_ALIAS"]) for b in binds})
 
-    with oracledb.connect(user=REPOSITORY["user"], password=password, dsn=dsn) as conn:
+    with oracledb.connect(user=repo["user"], password=password, dsn=dsn) as conn:
         with conn.cursor() as cur:
             cur.executemany(delete_sql, delete_keys)
             cur.executemany(insert_sql, binds)
         conn.commit()
-    print(f"[REPO] {REPOSITORY_TABLE} {len(binds)}건 적재 완료")
+    print(f"[REPO] {table} {len(binds)}건 적재 완료")
 
 
 # ---------------------------------------------------------------------------
 # 7. 실행
 # ---------------------------------------------------------------------------
 def main() -> int:
-    rows = run_daily_check()
+    parser = argparse.ArgumentParser(description="SQL Server 일일점검")
+    parser.add_argument("--config", default=str(CONFIG_PATH), help="설정 파일 경로 (기본: 스크립트 폴더의 dcheck_config.json)")
+    args = parser.parse_args()
 
-    out_path = Path(__file__).parent / f"daily_check_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    try:
+        cfg = load_config(resolve_path(args.config))
+    except Exception as e:
+        print(f"[설정] {e}", file=sys.stderr)
+        return 2
+    print(f"sqlcmd: {cfg['servers'][0]['sqlcmd_path'] if cfg['servers'] else '-'}")
+
+    rows = run_daily_check(cfg["servers"])
+
+    out_dir: Path = cfg["output_dir"]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"daily_check_{datetime.now():%Y%m%d_%H%M%S}.csv"
     export_csv(rows, out_path)
 
     try:
-        insert_results_to_repository(rows)
+        insert_results_to_repository(rows, cfg["repository"])
     except Exception as e:
         print(f"[REPO] 적재 실패 (CSV 는 저장됨: {out_path}): {e}", file=sys.stderr)
         return 1

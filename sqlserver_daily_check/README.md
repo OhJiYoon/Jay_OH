@@ -6,6 +6,7 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
 | 파일 | 설명 |
 |---|---|
 | `sql_server_daily_check.py` | 점검 스크립트 |
+| `dcheck_config.sample.json` | 설정 파일 예시 (서버/적재 DB 접속정보, sqlcmd 경로) |
 | `create_repository_table.sql` | 적재 테이블 DDL (Oracle `IRDMOW.TB_MON_DB_MSSQL_DCHECK`) |
 | `select_mssql_dcheck_for_excel.sql` | 엑셀 출력 스크립트에 넣을 조회 쿼리 |
 | `db_desc_map.sample.json` | 서버/DB별 업무설명 매핑 예시 |
@@ -15,7 +16,9 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
 
 1. **sqlcmd 설치** (`sqlcmd -?` 로 확인). 없으면 "Microsoft Command Line Utilities for SQL Server" 또는 `winget install sqlcmd`.
 2. **점검대상 프로시저**: 각 인스턴스 master DB 에 `USP_DAILY_JOB_FAIL`, `USP_DAILY_BACKUP_LIST` 가 배포되어 있어야 한다 (sp_daily.sql).
-3. **비밀번호 환경변수** (코드/저장소에는 비밀번호를 넣지 않는다)
+3. **설정 파일**: `dcheck_config.sample.json` 을 `dcheck_config.json` 으로 복사해서 실제 값으로 수정 (아래 '설정 파일').
+   `dcheck_config.json` 은 저장소/배포 파일에 포함되지 않으므로 스크립트를 새 버전으로 덮어써도 유지된다.
+4. **비밀번호 환경변수** (설정 파일/코드에는 비밀번호를 넣지 않는다)
    ```powershell
    # 값에 $ 가 있으므로 반드시 작은따옴표
    [Environment]::SetEnvironmentVariable('DBCHECK_PASSWORD',     '<LOGADMIN 비밀번호>', 'User')  # 점검대상 SQL Server
@@ -24,35 +27,66 @@ sqlcmd 로 점검대상 SQL Server(2노드 MSFC 인스턴스 × 4대)에 접속�
    작업 스케줄러로 돌릴 경우 작업을 실행하는 계정으로 설정하거나 `'Machine'` 범위로 설정한다.
    설정 확인: `[Environment]::GetEnvironmentVariable('DBCHECK_PASSWORD','User')`
    (이미 열려 있던 터미널/IDE 에는 새 값이 보이지 않으므로 스크립트가 레지스트리에서 직접 읽는다)
-4. **Oracle 적재**: Instant Client `C:\Oracle\instantclient_19_30`, python `oracledb` (설치됨).
-   `create_repository_table.sql` 로 테이블 생성 (최초 1회).
-5. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.
+5. **Oracle 적재**: Instant Client, python `oracledb` (설치됨). `create_repository_table.sql` 로 테이블 생성 (최초 1회).
+6. **업무설명 매핑**: `db_desc_map.sample.json` 을 `db_desc_map.json` 으로 복사해서 `{서버번호: {DB명: 업무설명}}` 형태로 채운다.
    `db_desc_map.json` 이 있으면 그 파일을, 없으면 샘플을 사용한다. 매핑에 없는 DB 는 `입력 필요` 로 표시된다.
    (SQL Server 는 Oracle/MySQL 처럼 조회 가능한 업무설명 메타데이터가 없어서 파일로 관리)
 
 ## 실행
 
 ```
-python sql_server_daily_check.py
+python D:\scripts\sqlserver_daily_check\sql_server_daily_check.py
+python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 파일을 다른 위치에 둘 때
 ```
+
+어느 폴더/드라이브에서 실행해도 된다. 설정 파일, 업무설명 매핑, 상대경로는 실행 위치가 아니라 **스크립트 폴더 기준**으로 찾는다.
 
 1. 4대 서버를 순서대로 점검
 2. `daily_check_YYYYMMDD_HHMMSS.csv` 저장 (UTF-8 BOM → Windows Excel 에서 한글 정상)
 3. Oracle 적재: 같은 `REG_DT`(점검일자)+서버의 기존 결과를 지우고 새로 INSERT → 같은 날 재실행해도 중복 없음.
-   실패 시 전체 롤백, 종료코드 1 (작업 스케줄러에서 실패 확인 가능, CSV 는 남음)
 
-## 설정 (스크립트 상단)
+| 종료코드 | 의미 |
+|---|---|
+| 0 | 정상 |
+| 1 | 점검은 했으나 Oracle 적재 실패 (CSV 는 남음, 전체 롤백) |
+| 2 | 설정 오류 (설정 파일 없음/형식 오류, sqlcmd 를 찾을 수 없음) |
+
+## 설정 파일 (`dcheck_config.json`)
+
+| 항목 | 설명 |
+|---|---|
+| `sqlcmd_path` | SQLCMD.EXE 전체 경로. **비워두면** PATH → `%ProgramFiles%\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn` → `%ProgramFiles%\Microsoft SQL Server\*\Tools\Binn` → `%ProgramFiles%\SqlCmd` 순서로 자동 탐색. 실행 시 첫 줄에 사용한 경로가 출력됨 |
+| `output_dir` | CSV 저장 폴더. 비우면 스크립트 폴더. 없으면 자동 생성 |
+| `sql_login` | 점검대상 공통 SQL 인증 계정(`user`)과 비밀번호 환경변수 이름(`password_env`) |
+| `servers` | 점검대상 목록. `alias`, `host`, `port` 필수. 서버별로 `user`, `password_env`, `auth`(`sql`/`windows`), `trust_cert` 를 넣으면 공통값 대신 사용. DB 목록은 `sys.databases` 에서 자동 조회 |
+| `repository` | 적재 Oracle 접속정보, 테이블명, Instant Client 경로(`oracle_client_dir`) |
+
+경로 작성 규칙
+- JSON 에서는 `\` 를 `\\` 로 두 번 쓰거나 `/` 로 쓴다. 예) `"C:\\Oracle\\instantclient_19_30"` 또는 `"C:/Oracle/instantclient_19_30"`
+- 스크립트와 다른 드라이브에 있으면 **드라이브 문자부터 전체 경로**로 쓴다 (`C:\...`). 드라이브 없이 쓴 상대경로는 스크립트 폴더 기준.
+- `%ProgramFiles%` 같은 환경변수를 쓸 수 있다.
+
+스크립트 상단 상수 (거의 바꿀 일 없음)
 
 | 항목 | 값 | 설명 |
 |---|---|---|
-| `SERVERS` | SQLSVR1~4 | 서버 추가 시 IP/PORT 만 추가. DB 목록은 `sys.databases` 에서 자동 조회 |
-| `DB_LOGIN_USER` | `LOGADMIN` | SQL 인증 계정 |
-| `REPOSITORY` | `10.10.20.134:1525/DIRST`, `IRDMOW` | 적재 Oracle (19c) |
 | `SQLCMD_LOGIN_TIMEOUT_SEC` / `SQLCMD_QUERY_TIMEOUT_SEC` | 15 / 30 | sqlcmd `-l` / `-t` |
 | `SQLCMD_TIMEOUT_SEC` | 60 | sqlcmd 프로세스 강제종료 한도 (최후 안전장치) |
 | `LONG_RUNNING_THRESHOLD_SEC` | 60 | 장시간 수행SQL 기준 |
 | `ERRORLOG_LOOKBACK_DAYS` | 1 | 에러로그 조회 기간 |
 | `ERRORLOG_MAX_SIZE_MB` | 100 | 현재 에러로그가 이보다 크면 읽지 않음 |
+
+## sqlcmd 실행 실패 (code=N) 확인
+
+오류 메시지의 `STDOUT` / `STDERR` 내용으로 원인을 본다.
+
+| 메시지 | 원인 / 조치 |
+|---|---|
+| `Login failed for user 'LOGADMIN'` (Msg 18456) | 계정/비밀번호 확인 |
+| `A network-related or instance-specific error` / `Login timeout expired` | IP/PORT, 방화벽, SQL Browser 확인 |
+| `Could not find stored procedure 'master.dbo.USP_DAILY_...'` | 해당 서버에 sp_daily.sql 프로시저 배포 필요 (그 항목만 '점검실패') |
+| `certificate chain was issued by an authority that is not trusted` | `trust_cert` 가 true 인지 확인 |
+| `'-...' : Unknown Option` | 설치된 sqlcmd 버전이 옵션을 지원하지 않음 → 최신 sqlcmd 설치 |
 
 ## 점검 항목
 
@@ -93,7 +127,9 @@ python sql_server_daily_check.py
 - **맥스게이지 프로세스** 는 별도 페이지에서 직접 확인하므로 `특이사항 없음` 고정값으로 출력
 - 끝에 세미콜론 없음 (스크립트에서 실행하기 위함)
 
-## 한글 인코딩
+## 한글 인코딩 / sqlcmd 옵션
+
+- `-W`(공백 제거)는 `-y`(긴 결과 잘림 방지)와 함께 쓸 수 없어 사용하지 않는다 (같이 주면 sqlcmd 가 code=1 로 종료). 공백은 스크립트에서 제거한다.
 
 - sqlcmd 는 한글 Windows 에서 기본 CP949 로 출력하므로 `-f 65001` 로 UTF-8 고정 (미지정 시 결과 한글 깨짐)
 - CSV 는 BOM 포함 UTF-8 (BOM 없으면 Excel 이 CP949 로 읽어 깨짐)
