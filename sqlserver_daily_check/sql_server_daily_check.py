@@ -168,7 +168,7 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
         "-S", f"{server['host']},{server['port']}",
         "-d", "master",
         "-h", "-1",
-        "-y", "0",       # -W 와 함께 쓸 수 없음 (같이 주면 sqlcmd 가 code=1 로 종료)
+        "-y", "8000",    # FOR JSON 결과(행당 최대 2033자)가 잘리지 않는 폭. -y 0 은 -h 와, -W 는 -y 와 함께 못 씀
         "-b",
         "-f", "65001",   # UTF-8 입출력 (미지정 시 한글 깨짐)
         "-l", str(SQLCMD_LOGIN_TIMEOUT_SEC),

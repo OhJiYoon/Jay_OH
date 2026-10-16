@@ -127,7 +127,9 @@ python sql_server_daily_check.py --config E:\conf\dcheck_config.json   # 설정 
 
 ## 한글 인코딩 / sqlcmd 옵션
 
-- `-W`(공백 제거)는 `-y`(긴 결과 잘림 방지)와 함께 쓸 수 없어 사용하지 않는다 (같이 주면 sqlcmd 가 code=1 로 종료). 공백은 스크립트에서 제거한다.
+- sqlcmd 옵션 제약: `-W` 는 `-y` 와, `-y 0` 은 `-h` 와 함께 쓸 수 없다 (같이 주면 code=1 로 종료).
+  그래서 `-h -1 -y 8000` 을 쓴다. FOR JSON 결과는 행당 최대 2033자로 나뉘어 나오므로 8000 이면 잘리지 않고,
+  폭을 맞추느라 붙는 뒤쪽 공백은 스크립트에서 제거한다.
 
 - sqlcmd 는 한글 Windows 에서 기본 CP949 로 출력하므로 `-f 65001` 로 UTF-8 고정 (미지정 시 결과 한글 깨짐)
 - CSV 는 BOM 포함 UTF-8 (BOM 없으면 Excel 이 CP949 로 읽어 깨짐)
