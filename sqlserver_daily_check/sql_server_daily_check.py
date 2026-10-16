@@ -101,6 +101,8 @@ def build_sqlcmd_args(server: dict[str, Any]) -> list[str]:
         "-W",         # 공백 트림
         "-y", "0",    # 가변길이 컬럼 출력 길이 제한 해제 (FOR JSON 결과 잘림 방지)
         "-b",         # 에러 발생 시 0이 아닌 종료코드 반환
+        "-f", "65001",  # 입출력 코드페이지를 UTF-8로 고정. 미지정 시 한글 Windows에서는 CP949(OEM)로
+                        # 출력되어 utf-8 디코딩 시 한글(N'정상', 한글 Job명/DB명 등)이 깨진다.
     ]
     if server.get("trust_cert", True):
         args.append("-C")
@@ -323,7 +325,8 @@ FOR JSON PATH;
 # ---------------------------------------------------------------------------
 def load_db_desc_map() -> dict[str, dict[str, str]]:
     if DB_DESC_MAP_PATH.exists():
-        with open(DB_DESC_MAP_PATH, encoding="utf-8") as f:
+        # 메모장 등에서 저장하면 BOM이 붙을 수 있으므로 utf-8-sig 로 읽는다 (BOM 없어도 정상 동작)
+        with open(DB_DESC_MAP_PATH, encoding="utf-8-sig") as f:
             return json.load(f)
     return {}
 
@@ -449,6 +452,7 @@ def export_csv(rows: list[dict[str, Any]], out_path: Path) -> None:
         print("저장할 결과가 없습니다.")
         return
     fieldnames = list(rows[0].keys())
+    # Windows Excel은 BOM이 없는 UTF-8 CSV를 CP949로 해석해 한글이 깨지므로 반드시 utf-8-sig(BOM 포함)로 저장
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

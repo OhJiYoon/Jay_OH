@@ -1,4 +1,4 @@
--- 일일점검결과 중앙 저장소 테이블 예시 DDL
+﻿-- 일일점검결과 중앙 저장소 테이블 예시 DDL
 -- sql_server_daily_check.py 의 insert_results_to_repository() 가 참조하는 스키마.
 -- 실제 환경에 맞게 DB명/스키마/컬럼 타입을 조정해서 사용할 것.
 
